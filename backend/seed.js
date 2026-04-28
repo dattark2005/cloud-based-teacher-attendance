@@ -44,6 +44,7 @@ const DEMO = [
     department:  'Information Technology',
     designation: 'Associate Professor',
     phone:       '9876543211',
+    role:        'ADMIN',
   },
 ];
 

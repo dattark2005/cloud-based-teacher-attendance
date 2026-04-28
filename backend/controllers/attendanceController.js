@@ -17,31 +17,178 @@ function getTodayDateString() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
-// ─── CHECK-IN ─────────────────────────────────────────────────────────────────
+// ─── SESSION HELPERS ──────────────────────────────────────────────────────────
+
+/** Returns the currently open session (cabinOutTime === null), or null. */
+function getOpenSession(logDoc) {
+  if (!logDoc || !logDoc.sessions.length) return null;
+  return logDoc.sessions.find(s => !s.cabinOutTime) || null;
+}
+
+/**
+ * For a given session, what is the teacher's current gate state?
+ * Returns 'IN' (in cabin / returned) or 'OUT' (left via gate, not yet back).
+ */
+function gateState(session) {
+  if (!session.movements.length) return 'IN'; // just cabin-checked-in
+  const last = session.movements[session.movements.length - 1];
+  return last.type === 'GATE_OUT' ? 'OUT' : 'IN';
+}
+
+// ─── CORE SCAN EVENT HANDLER ──────────────────────────────────────────────────
+
+/**
+ * Handles CABIN_IN / CABIN_OUT / GATE_OUT / GATE_IN events.
+ * Returns { autoCheckedIn: bool, reason: string }.
+ */
+async function handleScanEvent(teacher, type, confidence, io) {
+  const today = getTodayDateString();
+  const now   = new Date();
+
+  let logDoc = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
+  if (!logDoc) {
+    logDoc = new AttendanceLog({
+      teacherId: teacher._id,
+      date:      today,
+      status:    'ABSENT',
+      sessions:  [],
+    });
+  } else {
+    // Normalize legacy status fields (old docs may have 'LATE' which was removed)
+    if (logDoc.status === 'LATE') logDoc.status = 'PRESENT';
+    // Also fix any sessions that still carry 'LATE' (same migration)
+    for (const s of logDoc.sessions) {
+      if (s.status === 'LATE') s.status = 'PRESENT';
+    }
+  }
+
+  let autoCheckedIn = false;
+  let reason        = '';
+
+  switch (type) {
+
+    // ── Cabin Check-In — start a new session ────────────────────────────────
+    case 'CABIN_IN': {
+      const open = getOpenSession(logDoc);
+      if (open) {
+        reason = 'Session already open — please check out first';
+        break;
+      }
+      const sessionStatus = 'PRESENT';
+
+      logDoc.sessions.push({
+        cabinInTime:  now,
+        cabinOutTime: null,
+        status:       sessionStatus,
+        confidence:   confidence || null,
+        movements:    [],
+      });
+
+      // Update top-level convenience fields
+      if (!logDoc.checkInTime) {
+        logDoc.checkInTime  = now;
+        logDoc.status       = sessionStatus;
+        logDoc.confidenceScore = confidence || null;
+        logDoc.verificationMethod = 'FACE';
+      }
+
+      autoCheckedIn = true;
+      reason        = 'Cabin session started';
+
+      if (io) io.emit('attendance:checkin', {
+        teacherId:   teacher._id.toString(),
+        teacherName: teacher.fullName,
+        timestamp:   now,
+        status:      sessionStatus,
+        confidence,
+      });
+      break;
+    }
+
+    // ── Cabin Check-Out — close the open session ─────────────────────────────
+    case 'CABIN_OUT': {
+      const open = getOpenSession(logDoc);
+      if (!open) {
+        reason = 'No open session — please check in first';
+        break;
+      }
+      // Cannot check out while outside via gate
+      if (gateState(open) === 'OUT') {
+        reason = 'Teacher is currently outside (gate OUT pending) — return via gate first';
+        break;
+      }
+      open.cabinOutTime = now;
+      logDoc.checkOutTime = now;  // update convenience field
+
+      autoCheckedIn = true;
+      reason        = 'Cabin session closed';
+
+      if (io) io.emit('attendance:checkout', {
+        teacherId:   teacher._id.toString(),
+        teacherName: teacher.fullName,
+        timestamp:   now,
+      });
+      break;
+    }
+
+    // ── Gate OUT — teacher leaving campus temporarily ────────────────────────
+    case 'GATE_OUT': {
+      const open = getOpenSession(logDoc);
+      if (!open) {
+        reason = 'No open cabin session — GATE_OUT ignored';
+        break;
+      }
+      if (gateState(open) === 'OUT') {
+        reason = 'Already logged as outside — duplicate GATE_OUT ignored';
+        break;
+      }
+      open.movements.push({ type: 'GATE_OUT', timestamp: now, confidence: confidence || null });
+      autoCheckedIn = true;
+      reason        = 'Gate OUT recorded';
+      break;
+    }
+
+    // ── Gate IN — teacher returning to campus ────────────────────────────────
+    case 'GATE_IN': {
+      const open = getOpenSession(logDoc);
+      if (!open) {
+        reason = 'No open cabin session — GATE_IN ignored';
+        break;
+      }
+      if (gateState(open) === 'IN') {
+        reason = 'Not logged as outside — GATE_IN ignored';
+        break;
+      }
+      open.movements.push({ type: 'GATE_IN', timestamp: now, confidence: confidence || null });
+      autoCheckedIn = true;
+      reason        = 'Gate IN recorded';
+      break;
+    }
+
+    default:
+      reason = `Unknown event type: ${type}`;
+  }
+
+  if (autoCheckedIn) {
+    await logDoc.save();
+  }
+
+  return { autoCheckedIn, reason };
+}
+
+// ─── CHECK-IN (profile page / manual) ────────────────────────────────────────
 
 // POST /api/attendance/check-in
 const checkIn = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
-    const { faceImage, location = 'Campus Entrance' } = req.body;
+    const { faceImage, location = 'Admin Cabin' } = req.body;
 
     if (!faceImage) {
       return res.status(400).json({ success: false, message: 'Face image is required' });
     }
 
-    const today = getTodayDateString();
-
-    // Check if already checked in
-    const existing = await AttendanceLog.findOne({ teacherId, date: today });
-    if (existing && existing.checkInTime) {
-      return res.status(400).json({
-        success: false,
-        message: 'Already checked in for today',
-        data: { log: existing },
-      });
-    }
-
-    // Verify face with Python service
+    // Verify face
     const teacher = await Teacher.findById(teacherId).select('+faceEncoding +faceImageData');
     if (!teacher || (!teacher.faceEncoding && !teacher.faceImageData)) {
       return res.status(400).json({
@@ -52,144 +199,68 @@ const checkIn = async (req, res, next) => {
     }
 
     const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-
     let confidenceScore = null;
-    let verificationMethod = 'FACE_LOCAL';
     let snapshotUrl = null;
 
     try {
       const formData = new FormData();
       formData.append('user_id', teacherId.toString());
       formData.append('file', imageBuffer, { filename: 'verify.jpg', contentType: 'image/jpeg' });
-
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 20000,
+        headers: formData.getHeaders(), timeout: 20000,
       });
-
       if (!pyRes.data.verified) {
         return res.status(401).json({
           success: false,
-          message: '❌ Face not recognised. Please try again in good lighting.',
+          message: '❌ Face not recognised. Try in better lighting.',
           data: { confidence: pyRes.data.confidence },
         });
       }
-
       confidenceScore = pyRes.data.confidence;
-      verificationMethod = 'FACE';
       snapshotUrl = pyRes.data.verificationImageUrl || null;
-    } catch (serviceErr) {
-      console.warn('⚠️  Face service unavailable — fallback check-in');
-      // Upload snapshot to Cloudinary as record
-      try {
-        const uploadRes = await new Promise((resolve, reject) => {
-          const stream = cloudinary.uploader.upload_stream(
-            { folder: 'teacher_attendance/checkins', public_id: `checkin_${teacherId}_${Date.now()}` },
-            (err, res) => (err ? reject(err) : resolve(res))
-          );
-          require('stream').Readable.from(imageBuffer).pipe(stream);
-        });
-        snapshotUrl = uploadRes.secure_url;
-      } catch (_) {}
+    } catch {
+      console.warn('⚠️  Face service unavailable — proceeding');
     }
 
-    // Determine status — LATE if after 9:30 AM
-    const now = new Date();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
-    const isLate = hours > 9 || (hours === 9 && minutes > 30);
-
-    const logEntry = {
-      event: 'CHECK_IN',
-      timestamp: now,
-      confidence: confidenceScore,
-      snapshotUrl,
-    };
-
-    let log;
-    if (existing) {
-      // Already has a record (e.g. from a previous session), update it
-      existing.checkInTime = now;
-      existing.status = isLate ? 'LATE' : 'PRESENT';
-      existing.confidenceScore = confidenceScore;
-      existing.verificationMethod = verificationMethod;
-      existing.snapshotUrl = snapshotUrl;
-      existing.location = location;
-      existing.logs.push(logEntry);
-      log = await existing.save();
-    } else {
-      log = await AttendanceLog.create({
-        teacherId,
-        date: today,
-        checkInTime: now,
-        status: isLate ? 'LATE' : 'PRESENT',
-        verificationMethod,
-        confidenceScore,
-        snapshotUrl,
-        location,
-        logs: [logEntry],
-      });
-    }
-
-    // Broadcast to socket clients
     const io = req.app.get('io');
-    if (io) {
-      io.emit('attendance:checkin', {
-        teacherId: teacherId.toString(),
-        teacherName: teacher.fullName,
-        timestamp: now,
-        status: log.status,
-      });
+    const { autoCheckedIn, reason } = await handleScanEvent(teacher, 'CABIN_IN', confidenceScore, io);
+
+    const today  = getTodayDateString();
+    const logDoc = await AttendanceLog.findOne({ teacherId, date: today });
+
+    if (!autoCheckedIn) {
+      return res.status(400).json({ success: false, message: reason, data: { log: logDoc } });
     }
 
     res.json({
       success: true,
-      message: `✅ Check-in successful! ${isLate ? '(Late)' : 'On time'}`,
-      data: {
-        log,
-        confidence: confidenceScore,
-        status: log.status,
-        checkInTime: log.checkInTime,
-      },
+      message: `✅ Checked in — ${reason}`,
+      data: { log: logDoc, confidence: confidenceScore, snapshotUrl },
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
-// ─── CHECK-OUT ────────────────────────────────────────────────────────────────
+// ─── CHECK-OUT (profile page / manual) ───────────────────────────────────────
 
 // POST /api/attendance/check-out
 const checkOut = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
-    const { faceImage, location = 'Campus Exit' } = req.body;
+    const { faceImage } = req.body;
 
     if (!faceImage) {
       return res.status(400).json({ success: false, message: 'Face image is required' });
     }
 
-    const today = getTodayDateString();
-    const existing = await AttendanceLog.findOne({ teacherId, date: today });
-
-    if (!existing || !existing.checkInTime) {
-      return res.status(400).json({ success: false, message: 'No check-in found for today. Please check in first.' });
-    }
-    if (existing.checkOutTime) {
-      return res.status(400).json({ success: false, message: 'Already checked out for today', data: { log: existing } });
-    }
-
     const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
     let confidenceScore = null;
-    let snapshotUrl = null;
 
     try {
       const formData = new FormData();
       formData.append('user_id', teacherId.toString());
       formData.append('file', imageBuffer, { filename: 'verify.jpg', contentType: 'image/jpeg' });
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 20000,
+        headers: formData.getHeaders(), timeout: 20000,
       });
       if (!pyRes.data.verified) {
         return res.status(401).json({
@@ -199,27 +270,27 @@ const checkOut = async (req, res, next) => {
         });
       }
       confidenceScore = pyRes.data.confidence;
-      snapshotUrl = pyRes.data.verificationImageUrl || null;
-    } catch (err) {
-      console.warn('⚠️  Face service unavailable — fallback check-out');
+    } catch {
+      console.warn('⚠️  Face service unavailable — proceeding');
     }
 
-    const now = new Date();
-    existing.checkOutTime = now;
-    existing.logs.push({ event: 'CHECK_OUT', timestamp: now, confidence: confidenceScore, snapshotUrl });
-    await existing.save();
+    const teacher = await Teacher.findById(teacherId).select('fullName');
+    const io      = req.app.get('io');
+    const { autoCheckedIn, reason } = await handleScanEvent(teacher, 'CABIN_OUT', confidenceScore, io);
 
-    const io = req.app.get('io');
-    if (io) io.emit('attendance:checkout', { teacherId: teacherId.toString(), timestamp: now });
+    const today  = getTodayDateString();
+    const logDoc = await AttendanceLog.findOne({ teacherId, date: today });
+
+    if (!autoCheckedIn) {
+      return res.status(400).json({ success: false, message: reason, data: { log: logDoc } });
+    }
 
     res.json({
       success: true,
-      message: '✅ Check-out recorded successfully',
-      data: { log: existing, checkOutTime: now },
+      message: `✅ Checked out — ${reason}`,
+      data: { log: logDoc, checkOutTime: logDoc.checkOutTime },
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 // ─── TODAY STATUS ─────────────────────────────────────────────────────────────
@@ -228,12 +299,11 @@ const checkOut = async (req, res, next) => {
 const getTodayStatus = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
-    const today = getTodayDateString();
-    const log = await AttendanceLog.findOne({ teacherId, date: today }).populate('teacherId', 'fullName employeeId');
+    const today     = getTodayDateString();
+    const log       = await AttendanceLog.findOne({ teacherId, date: today })
+                        .populate('teacherId', 'fullName employeeId');
     res.json({ success: true, data: { log, today } });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 // ─── MY ATTENDANCE HISTORY ────────────────────────────────────────────────────
@@ -242,35 +312,28 @@ const getTodayStatus = async (req, res, next) => {
 const getHistory = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
-    const limit = parseInt(req.query.limit) || 30;
-    const page  = parseInt(req.query.page)  || 1;
-    const skip  = (page - 1) * limit;
+    const limit     = parseInt(req.query.limit) || 30;
+    const page      = parseInt(req.query.page)  || 1;
+    const skip      = (page - 1) * limit;
 
     const [logs, total, allLogs] = await Promise.all([
-      AttendanceLog.find({ teacherId })
-        .sort({ date: -1 })
-        .skip(skip)
-        .limit(limit),
+      AttendanceLog.find({ teacherId }).sort({ date: -1 }).skip(skip).limit(limit),
       AttendanceLog.countDocuments({ teacherId }),
-      // Fetch all to compute accurate present/late totals
       AttendanceLog.find({ teacherId }, 'status'),
     ]);
 
     const present = allLogs.filter(l => l.status === 'PRESENT').length;
-    const late    = allLogs.filter(l => l.status === 'LATE').length;
-    const absent  = total - present - late;
+    const absent  = total - present;
 
     res.json({
       success: true,
       data: {
         logs,
-        stats: { total, present, late, absent: Math.max(0, absent) },
+        stats: { total, present, absent: Math.max(0, absent) },
         pagination: { page, limit, totalDocs: total, totalPages: Math.ceil(total / limit) },
       },
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 // ─── ADMIN: ALL ATTENDANCE ────────────────────────────────────────────────────
@@ -279,11 +342,10 @@ const getHistory = async (req, res, next) => {
 const getAllAttendance = async (req, res, next) => {
   try {
     const { date = getTodayDateString() } = req.query;
-    const logs = await AttendanceLog.find({ date }).populate('teacherId', 'fullName employeeId department');
-    const teachers = await Teacher.find({ isActive: true }, 'fullName employeeId department');
+    const logs     = await AttendanceLog.find({ date }).populate('teacherId', 'fullName employeeId department');
+    const teachers = await Teacher.find({ isActive: true, role: 'TEACHER' }, 'fullName employeeId department');
 
-    // Find absent teachers (no log for this date) — guard against null populate
-    const presentIds = new Set(logs.filter(l => l.teacherId).map(l => l.teacherId._id.toString()));
+    const presentIds   = new Set(logs.filter(l => l.teacherId).map(l => l.teacherId._id.toString()));
     const absentTeachers = teachers.filter(t => !presentIds.has(t._id.toString()));
 
     res.json({
@@ -294,90 +356,66 @@ const getAllAttendance = async (req, res, next) => {
         absent: absentTeachers,
         summary: {
           present: logs.filter(l => l.status === 'PRESENT').length,
-          late: logs.filter(l => l.status === 'LATE').length,
-          absent: absentTeachers.length,
-          total: teachers.length,
+          absent:  absentTeachers.length,
+          total:   teachers.length,
         },
       },
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
-// ─── CAMERA SCAN (identify from camera frame) ─────────────────────────────────
+// ─── CAMERA SCAN (WS-identified teacher) ─────────────────────────────────────
 
 // POST /api/attendance/camera-scan
 const cameraScan = async (req, res, next) => {
   try {
-    const { faceImage, userId: directUserId } = req.body;
+    const { faceImage, userId: directUserId, type = 'CABIN_IN' } = req.body;
+    const io = req.app.get('io');
 
-    // ── Path A: WS live-detect already identified the teacher — just record check-in ──
+    // ── Path A: WS live-detect already identified teacher ──
     if (directUserId && !faceImage) {
       const teacher = await Teacher.findById(directUserId).select('fullName employeeId department faceImageUrl');
       if (!teacher) {
         return res.status(404).json({ success: false, message: 'Teacher not found' });
       }
-      const today = getTodayDateString();
-      const existing = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
-      let autoCheckedIn = false;
-      if (!existing || !existing.checkInTime) {
-        const now = new Date();
-        const isLate = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
-        const logEntry = { event: 'CHECK_IN', timestamp: now, confidence: null };
-        if (existing) {
-          existing.checkInTime = now;
-          existing.status = isLate ? 'LATE' : 'PRESENT';
-          existing.verificationMethod = 'FACE';
-          existing.logs.push(logEntry);
-          await existing.save();
-        } else {
-          await AttendanceLog.create({
-            teacherId: teacher._id, date: today, checkInTime: now,
-            status: isLate ? 'LATE' : 'PRESENT', verificationMethod: 'FACE',
-            location: 'Campus Entrance', logs: [logEntry],
-          });
-        }
-        autoCheckedIn = true;
-        const io = req.app.get('io');
-        if (io) io.emit('attendance:checkin', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now, status: isLate ? 'LATE' : 'PRESENT' });
-      }
+
+      const { autoCheckedIn, reason } = await handleScanEvent(teacher, type, null, io);
+
       return res.json({
         success: true,
         data: {
           identified: true,
-          teacher: { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department, faceImageUrl: teacher.faceImageUrl },
+          teacher:    { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department },
           confidence: null,
           autoCheckedIn,
+          reason,
         },
       });
     }
 
-    // ── Path B: Legacy — faceImage base64 sent, identify via Python service ──
+    // ── Path B: Legacy — base64 faceImage, identify via Python ──
     if (!faceImage) {
       return res.status(400).json({ success: false, message: 'Either faceImage or userId is required' });
     }
 
     const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-    const formData = new FormData();
+    const formData    = new FormData();
     formData.append('file', imageBuffer, { filename: 'frame.jpg', contentType: 'image/jpeg' });
 
     let identified = false;
-    let teacher = null;
+    let teacher    = null;
     let confidence = 0;
 
     try {
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/identify-face`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 15000,
+        headers: formData.getHeaders(), timeout: 15000,
       });
-
       if (pyRes.data.identified) {
         identified = true;
         confidence = pyRes.data.confidence;
-        teacher = await Teacher.findById(pyRes.data.userId).select('fullName employeeId department faceImageUrl');
+        teacher    = await Teacher.findById(pyRes.data.userId).select('fullName employeeId department faceImageUrl');
       }
-    } catch (err) {
+    } catch {
       return res.json({ success: true, data: { identified: false, reason: 'Face service unavailable' } });
     }
 
@@ -385,57 +423,64 @@ const cameraScan = async (req, res, next) => {
       return res.json({ success: true, data: { identified: false, reason: 'No match found' } });
     }
 
-    // Auto check-in if not already checked in
-    const today = getTodayDateString();
-    const existing = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
-    let autoCheckedIn = false;
-
-    if (!existing || !existing.checkInTime) {
-      const now = new Date();
-      const isLate = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
-      const logEntry = { event: 'CHECK_IN', timestamp: now, confidence };
-
-      if (existing) {
-        existing.checkInTime = now;
-        existing.status = isLate ? 'LATE' : 'PRESENT';
-        existing.confidenceScore = confidence;
-        existing.verificationMethod = 'FACE';
-        existing.logs.push(logEntry);
-        await existing.save();
-      } else {
-        await AttendanceLog.create({
-          teacherId: teacher._id, date: today, checkInTime: now,
-          status: isLate ? 'LATE' : 'PRESENT', verificationMethod: 'FACE',
-          confidenceScore: confidence, location: 'Campus Entrance', logs: [logEntry],
-        });
-      }
-      autoCheckedIn = true;
-
-      // Emit realtime event
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('attendance:checkin', {
-          teacherId: teacher._id.toString(),
-          teacherName: teacher.fullName,
-          timestamp: now,
-          status: isLate ? 'LATE' : 'PRESENT',
-          confidence,
-        });
-      }
-    }
+    const { autoCheckedIn, reason } = await handleScanEvent(teacher, type, confidence, io);
 
     res.json({
       success: true,
       data: {
         identified: true,
-        teacher: { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department, faceImageUrl: teacher.faceImageUrl },
+        teacher:    { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department },
         confidence,
         autoCheckedIn,
+        reason,
       },
     });
-  } catch (err) {
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
-module.exports = { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan };
+// ─── TEACHER GATE LOGS (sessions, for scanner panel) ─────────────────────────
+
+// GET /api/attendance/teacher-logs/:teacherId?date=YYYY-MM-DD
+const getTeacherLogsToday = async (req, res, next) => {
+  try {
+    const { teacherId } = req.params;
+    const { date = getTodayDateString() } = req.query;
+
+    const log = await AttendanceLog.findOne({ teacherId, date })
+                  .populate('teacherId', 'fullName employeeId department');
+
+    if (!log) {
+      return res.json({ success: true, data: { sessions: [], teacher: null, status: 'ABSENT' } });
+    }
+
+    // Enrich sessions with derived state info
+    const enriched = log.sessions.map(s => ({
+      _id:          s._id,
+      cabinInTime:  s.cabinInTime,
+      cabinOutTime: s.cabinOutTime,
+      isOpen:       !s.cabinOutTime,
+      status:       s.status,
+      confidence:   s.confidence,
+      currentGateState: gateState(s),        // 'IN' or 'OUT'
+      movements:    s.movements.map(m => ({
+        type:      m.type,
+        timestamp: m.timestamp,
+      })),
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        teacher:      log.teacherId,
+        date:         log.date,
+        status:       log.status,
+        checkInTime:  log.checkInTime,
+        checkOutTime: log.checkOutTime,
+        sessions:     enriched,
+        openSession:  enriched.find(s => s.isOpen) || null,
+      },
+    });
+  } catch (err) { next(err); }
+};
+
+module.exports = { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan, getTeacherLogsToday };

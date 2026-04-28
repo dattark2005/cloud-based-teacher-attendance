@@ -1,10 +1,13 @@
 const express = require('express');
 const router = express.Router();
-const { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan } = require('../controllers/attendanceController');
+const { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan, getTeacherLogsToday } = require('../controllers/attendanceController');
 const { authenticate } = require('../middleware/auth');
 
 // Camera scan (public — used by entrance camera kiosk)
 router.post('/camera-scan', cameraScan);
+
+// Teacher gate logs (public — used by scanner kiosk to show per-teacher movement)
+router.get('/teacher-logs/:teacherId', getTeacherLogsToday);
 
 // All other routes require auth
 router.use(authenticate);

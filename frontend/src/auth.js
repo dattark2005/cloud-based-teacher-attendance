@@ -38,39 +38,26 @@ export function renderAuthPage() {
     <!-- REGISTER FORM -->
     <div id="register-form" class="hidden">
       <form class="auth-form" id="register-form-el">
-        <div class="grid-2" style="gap:14px">
-          <div class="form-group">
-            <label class="form-label">Full Name</label>
-            <input type="text" id="reg-name" class="form-input" placeholder="Dr. John Doe" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Employee ID</label>
-            <input type="text" id="reg-empid" class="form-input" placeholder="EMP001" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Email</label>
-            <input type="email" id="reg-email" class="form-input" placeholder="teacher@college.edu" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Department</label>
-            <input type="text" id="reg-dept" class="form-input" placeholder="Computer Science" required />
-          </div>
-          <div class="form-group" style="grid-column:1/-1">
-            <label class="form-label">Designation</label>
-            <select id="reg-desig" class="form-input form-select">
-              <option>Assistant Professor</option>
-              <option>Associate Professor</option>
-              <option>Professor</option>
-              <option>HOD</option>
-              <option>Lab Instructor</option>
-            </select>
-          </div>
-          <div class="form-group" style="grid-column:1/-1">
-            <label class="form-label">Password</label>
-            <input type="password" id="reg-password" class="form-input" placeholder="Min 6 characters" required minlength="6" />
-          </div>
+        <div class="form-group">
+          <label class="form-label">Full Name</label>
+          <input type="text" id="reg-name" class="form-input" placeholder="John Doe" required />
         </div>
-        <button type="submit" class="btn btn-primary btn-lg w-full" id="register-btn">
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select id="reg-role" class="form-input form-select">
+            <option value="TEACHER">Teacher</option>
+            <option value="ADMIN">Admin</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input type="email" id="reg-email" class="form-input" placeholder="user@college.edu" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input type="password" id="reg-password" class="form-input" placeholder="Min 6 characters" required minlength="6" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg w-full" id="register-btn" style="margin-top:10px">
           <span>Create Account</span>
         </button>
       </form>
@@ -122,27 +109,22 @@ export function initAuth(onSuccess) {
   document.getElementById('register-form-el').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = document.getElementById('register-btn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Creating account...';
+    btn.disabled = true; btn.innerHTML = '<div class="spinner"></div>';
     try {
-      const data = await apiFetch('/auth/register', {
-        method: 'POST',
-        body: JSON.stringify({
-          fullName: document.getElementById('reg-name').value,
-          employeeId: document.getElementById('reg-empid').value.toUpperCase(),
-          email: document.getElementById('reg-email').value,
-          department: document.getElementById('reg-dept').value,
-          designation: document.getElementById('reg-desig').value,
-          password: document.getElementById('reg-password').value,
-        }),
-      });
-      setAuth(data.data.token, data.data.teacher);
-      showToast('Account created!', 'Please register your face to enable attendance.', 'success');
-      onSuccess(data.data.teacher);
+      const payload = {
+        fullName: document.getElementById('reg-name').value,
+        role: document.getElementById('reg-role').value,
+        email: document.getElementById('reg-email').value,
+        password: document.getElementById('reg-password').value,
+      };
+      const res = await apiFetch('/auth/register', { method: 'POST', body: JSON.stringify(payload) });
+      setAuth(res.data.token, res.data.teacher);
+      showToast('Welcome!', 'Registration successful', 'success');
+      onSuccess(res.data.teacher);
     } catch (err) {
-      showToast('Registration failed', err.message, 'error');
-      btn.disabled = false;
-      btn.innerHTML = '<span>Create Account</span>';
+      showToast('Error', err.message || 'Registration failed', 'error');
+    } finally {
+      btn.disabled = false; btn.innerHTML = '<span>Create Account</span>';
     }
   });
 }

@@ -26,6 +26,7 @@ from pathlib import Path
 import urllib.request
 from typing import Optional, Dict, List
 from datetime import datetime, timezone
+from collections import deque
 
 # ── Load .env ──
 try:
@@ -76,9 +77,15 @@ print("✅ OpenCV FaceDetectorYN + FaceRecognizerSF loaded")
 
 # ==================== CONFIGURATION ====================
 
-EMBEDDING_DIM = 128
-ENCODING_BYTES = EMBEDDING_DIM * 8
-COSINE_THRESHOLD = 0.363
+EMBEDDING_DIM = 128          # SFace outputs 128-dim vector
+ENCODING_BYTES = EMBEDDING_DIM * 8  # 1024 bytes (float64)
+
+# ── Matching thresholds ──────────────────────────────────────────────────────
+# Raised from OpenCV default (0.363) to reduce false positives in live-detect.
+# Both cosine AND L2 must pass; ambiguous matches (margin < MIN_MARGIN) are rejected.
+COSINE_THRESHOLD = 0.363      # min cosine similarity to accept a match
+L2_THRESHOLD     = 1.128      # max L2 distance to accept a match (lower = stricter)
+MIN_MARGIN       = 0.04       # margin check (only applies if 2nd best is also high)
 
 # ==================== FASTAPI APP ====================
 
@@ -112,10 +119,15 @@ db = mongo_client.teacher_attendance
 
 # ==================== HELPERS ====================
 
-def image_bytes_to_bgr(data: bytes) -> np.ndarray:
+def image_bytes_to_bgr(data: bytes, max_dim: int = 800) -> np.ndarray:
     img = Image.open(io.BytesIO(data))
     rgb = np.array(img.convert('RGB'))
-    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    h, w = bgr.shape[:2]
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)))
+    return bgr
 
 
 def detect_face(image_bgr: np.ndarray):
@@ -154,24 +166,30 @@ def match_score(emb1: np.ndarray, emb2: np.ndarray) -> dict:
     if n1 == 0 or n2 == 0:
         return {"cosine_score": 0.0, "l2_distance": 99.0, "is_match": False, "confidence": 0.0}
     cosine_score = float(np.dot(v1 / n1, v2 / n2))
-    l2_distance = float(np.linalg.norm(v1 - v2))
-    is_match = cosine_score >= COSINE_THRESHOLD
+    l2_distance  = float(np.linalg.norm((v1 / n1) - (v2 / n2)))
+    # Dual-gate: both cosine similarity AND L2 distance must pass
+    is_match = (cosine_score >= COSINE_THRESHOLD) and (l2_distance <= L2_THRESHOLD)
     return {"cosine_score": cosine_score, "l2_distance": l2_distance, "is_match": is_match, "confidence": cosine_score}
 
 
 def detect_liveness(image_bgr: np.ndarray):
+    """Basic liveness: blur check + face presence check."""
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if lap_var < 30:
+
+    if lap_var < 5:
         return False, 0.3, "Image too blurry"
-    if lap_var > 20000:
-        return False, 0.4, "Image too sharp (possible printed photo)"
+    if lap_var > 8000:
+        return False, 0.4, "Image too sharp (printed photo?)"
+
     face = detect_face(image_bgr)
     if face is None:
         return False, 0.2, "No face detected"
-    confidence = float(face[-1])
+
+    confidence = float(face[-1])  # YuNet confidence
     if confidence < 0.7:
         return False, confidence, "Low face detection confidence"
+
     return True, max(0.85, confidence), "Live face detected"
 
 
@@ -198,7 +216,8 @@ async def register_face_endpoint(
 
         logger.info(f"Registration: embedding shape={embedding.shape}, norm={np.linalg.norm(embedding):.4f}")
 
-        upload_result = cloudinary.uploader.upload(
+        upload_result = await asyncio.to_thread(
+            cloudinary.uploader.upload,
             image_data,
             folder="teacher_attendance/faces",
             public_id=f"teacher_{user_id}_{int(time.time())}",
@@ -398,9 +417,17 @@ async def ws_live_detect(websocket: WebSocket):
             try:
                 arr = np.frombuffer(raw_bytes, np.uint8)
                 bgr  = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                if bgr is None:
+                if bgr is None or bgr.shape[0] < 32 or bgr.shape[1] < 32:
                     await websocket.send_json({"error": "bad frame"})
                     continue
+                
+                # Prevent bad allocation by limiting max dimensions
+                max_dim = 800
+                h, w = bgr.shape[:2]
+                if max(h, w) > max_dim:
+                    scale = max_dim / max(h, w)
+                    bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)))
+                    
             except Exception:
                 await websocket.send_json({"error": "decode error"})
                 continue
@@ -408,7 +435,7 @@ async def ws_live_detect(websocket: WebSocket):
             h_frame, w_frame = bgr.shape[:2]
             faces = detect_all_faces(bgr)
 
-            # Build face-box list (normalised to frame size)
+            # Build face-box list
             face_boxes = []
             if faces is not None:
                 for f in faces:
@@ -418,58 +445,102 @@ async def ws_live_detect(websocket: WebSocket):
                         "conf": round(float(f[-1]), 3)
                     })
 
-            # Identity lookup
-            identity: dict = {"identified": False, "userId": None,
-                               "teacherName": None, "confidence": 0.0}
+            # Identity lookup — identify EVERY detected face independently
+            face_identities: list = []  # parallel to face_boxes
 
             if face_boxes:
                 now = time.time()
-                if now - cache_ts > 30:
+                if now - cache_ts > 10:
                     teacher_cache = await db.teachers.find(
                         {"faceEncoding": {"$exists": True}}
                     ).to_list(500)
                     cache_ts = now
+                    logger.info(f"Updated teacher_cache: {len(teacher_cache)} teachers loaded.")
 
-                try:
-                    best_face = faces[int(np.argmax(faces[:, -1]))]
-                    aligned   = face_recognizer.alignCrop(bgr, best_face)
-                    cur_emb   = face_recognizer.feature(aligned).flatten().astype(np.float64)
+                for face in faces:
+                    try:
+                        aligned  = face_recognizer.alignCrop(bgr, face)
+                        cur_emb  = face_recognizer.feature(aligned).flatten().astype(np.float64)
 
-                    best_score = 0.0
-                    best_t     = None
-                    for t in teacher_cache:
-                        raw = t.get("faceEncoding")
-                        if raw is None:
-                            continue
-                        if hasattr(raw, "read"):
-                            raw = raw.read()
-                        elif not isinstance(raw, (bytes, bytearray)):
-                            raw = bytes(raw)
-                        if len(raw) != ENCODING_BYTES:
-                            continue
-                        stored = np.frombuffer(raw, dtype=np.float64)
-                        r = match_score(stored, cur_emb)
-                        if r["is_match"] and r["cosine_score"] > best_score:
-                            best_score = r["cosine_score"]
-                            best_t     = t
+                        per_best_score   = 0.0
+                        per_second_score = 0.0
+                        per_best_t       = None
+                        per_best_l2      = 99.0
 
-                    if best_t:
-                        identity = {
-                            "identified":   True,
-                            "userId":       str(best_t["_id"]),
-                            "teacherName":  best_t.get("fullName"),
-                            "confidence":   round(float(best_score), 4),
-                        }
-                except Exception as ex:
-                    logger.debug(f"WS identify error: {ex}")
+                        for t in teacher_cache:
+                            raw = t.get("faceEncoding")
+                            if raw is None:
+                                continue
+                            if hasattr(raw, "read"):
+                                raw = raw.read()
+                            elif not isinstance(raw, (bytes, bytearray)):
+                                raw = bytes(raw)
+                            if len(raw) != ENCODING_BYTES:
+                                continue
+                            stored = np.frombuffer(raw, dtype=np.float64)
+                            r = match_score(stored, cur_emb)
+                            if r["cosine_score"] > per_best_score:
+                                per_second_score = per_best_score
+                                per_best_score   = r["cosine_score"]
+                                per_best_l2      = r["l2_distance"]
+                                per_best_t       = t if r["is_match"] else None
+                            elif r["cosine_score"] > per_second_score:
+                                per_second_score = r["cosine_score"]
+
+                        # Margin gate: reject if best and 2nd-best are too close
+                        # Only apply margin if the second best score is somewhat competitive
+                        margin = per_best_score - per_second_score
+                        if per_best_t and margin < MIN_MARGIN and per_second_score > (COSINE_THRESHOLD - 0.05):
+                            logger.debug(f"WS margin too small ({margin:.3f}) best={per_best_score:.3f} 2nd={per_second_score:.3f} — rejecting ambiguous match")
+                            per_best_t = None
+
+                        if per_best_t:
+                            logger.info(f"Match found: {per_best_t.get('fullName')} (cos={per_best_score:.3f}, l2={per_best_l2:.3f})")
+                            face_identities.append({
+                                "identified":  True,
+                                "userId":      str(per_best_t["_id"]),
+                                "teacherName": per_best_t.get("fullName"),
+                                "confidence":  round(float(per_best_score), 4),
+                            })
+                        else:
+                            if per_best_score > 0:
+                                logger.info(f"Unknown face: best_score={per_best_score:.3f}, l2={per_best_l2:.3f}")
+                            face_identities.append({"identified": False, "userId": None, "teacherName": None, "confidence": 0.0})
+
+                    except Exception as ex:
+                        logger.debug(f"WS per-face identify error: {ex}")
+                        face_identities.append({"identified": False, "userId": None, "teacherName": None, "confidence": 0.0})
+
+            # ── Prevent duplicate identity in same frame ──
+            assigned_uids = {}
+            for idx, fi in enumerate(face_identities):
+                if fi["identified"]:
+                    uid = fi["userId"]
+                    if uid not in assigned_uids or fi["confidence"] > face_identities[assigned_uids[uid]]["confidence"]:
+                        assigned_uids[uid] = idx
+
+            for idx, fi in enumerate(face_identities):
+                if fi["identified"] and assigned_uids[fi["userId"]] != idx:
+                    fi["identified"] = False
+                    fi["userId"] = None
+                    fi["teacherName"] = None
+
+            # Legacy single-identity fields (first identified face, for back-compat)
+            identity: dict = {"identified": False, "userId": None, "teacherName": None, "confidence": 0.0}
+            for fi in face_identities:
+                if fi["identified"]:
+                    identity = fi
+                    break
 
             await websocket.send_json({
-                "faceBoxes":   face_boxes,
-                "frameW":      w_frame,
-                "frameH":      h_frame,
-                "ts":          time.time(),
+                "faceBoxes":      face_boxes,
+                "faceIdentities": face_identities,
+                "frameW":         w_frame,
+                "frameH":         h_frame,
+                "ts":             time.time(),
                 **identity,
             })
+
 
     except WebSocketDisconnect:
         pass

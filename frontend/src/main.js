@@ -8,6 +8,8 @@ import { renderProfile, initProfile } from './profile.js';
 const app = document.getElementById('app');
 
 function renderApp(teacher) {
+  const isAdmin = teacher.role === 'ADMIN';
+
   app.innerHTML = `
   <!-- Toast container -->
   <div id="toast-container"></div>
@@ -25,7 +27,7 @@ function renderApp(teacher) {
       <div class="sidebar-logo-icon">🎓</div>
       <div>
         <div class="sidebar-logo-text grad-text">EduTrack</div>
-        <div class="text-dim" style="font-size:11px">Teacher Attendance</div>
+        <div class="text-dim" style="font-size:11px">${isAdmin ? 'Admin Portal' : 'Teacher Portal'}</div>
       </div>
     </div>
     <div class="sidebar-nav">
@@ -33,9 +35,14 @@ function renderApp(teacher) {
       <div class="nav-item active" data-page="dashboard">
         <span class="nav-icon">🏠</span> Dashboard
       </div>
-      <div class="nav-item" data-page="scanner">
-        <span class="nav-icon">📸</span> Camera Scanner
+      ${isAdmin ? `
+      <div class="nav-item" data-page="scanner-cabin">
+        <span class="nav-icon">🏫</span> Teacher Attendance
       </div>
+      <div class="nav-item" data-page="scanner-gate">
+        <span class="nav-icon">📸</span> Gate Cameras
+      </div>
+      ` : ''}
       <div class="nav-item" data-page="profile">
         <span class="nav-icon">👤</span> My Profile
       </div>
@@ -48,7 +55,7 @@ function renderApp(teacher) {
           </div>
           <div style="flex:1;min-width:0">
             <div class="font-semibold text-sm" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${teacher.fullName}</div>
-            <div class="text-dim" style="font-size:11px">${teacher.department}</div>
+            <div class="text-dim" style="font-size:11px">${isAdmin ? 'Administrator' : teacher.department}</div>
           </div>
         </div>
       </div>
@@ -60,7 +67,7 @@ function renderApp(teacher) {
 
   <!-- Pages -->
   ${renderDashboard(teacher)}
-  ${renderScanner()}
+  ${isAdmin ? renderScanner() : ''}
   ${renderProfile(teacher)}
   `;
 
@@ -78,8 +85,8 @@ function renderApp(teacher) {
 
   // Init pages
   navigate('dashboard');
-  initDashboard();
-  initScanner();
+  initDashboard(teacher);
+  if (isAdmin) initScanner();
   initProfile();
 }
 

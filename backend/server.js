@@ -100,8 +100,12 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 process.on('unhandledRejection', (err) => {
+  // Don't crash the server on transient DB/network errors
+  if (err && err.name && (err.name.includes('Mongo') || err.code === 'ENOTFOUND')) {
+    console.warn('⚠️  Transient DB error (ignored):', err.message);
+    return;
+  }
   console.error('❌ Unhandled Rejection:', err);
-  httpServer.close(() => process.exit(1));
 });
 
 process.on('uncaughtException', (err) => {

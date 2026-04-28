@@ -15,29 +15,32 @@ const formatTeacher = (t) => ({
   faceImageUrl: t.faceImageUrl || null,
   faceRegistered: !!t.faceRegisteredAt,
   faceRegisteredAt: t.faceRegisteredAt || null,
+  role: t.role,
   createdAt: t.createdAt,
 });
 
 // POST /api/auth/register
 const register = async (req, res, next) => {
   try {
-    const { fullName, employeeId, email, password, department, designation, phone } = req.body;
+    const { fullName, email, password, role } = req.body;
 
-    if (!fullName || !employeeId || !email || !password || !department) {
+    if (!fullName || !email || !password) {
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
     }
 
-    // Check for existing email/employeeId first to give friendly error
-    const exists = await Teacher.findOne({ $or: [{ email }, { employeeId: employeeId.toUpperCase() }] });
+    const exists = await Teacher.findOne({ email });
     if (exists) {
-      const field = exists.email === email.toLowerCase() ? 'Email' : 'EmployeeId';
-      return res.status(409).json({ success: false, message: `${field} already exists` });
+      return res.status(409).json({ success: false, message: 'Email already exists' });
     }
 
     const teacher = await Teacher.create({
-      fullName, employeeId, email, password, department,
-      designation: designation || 'Assistant Professor',
-      phone: phone || null,
+      fullName, 
+      employeeId: 'EMP' + Date.now().toString().slice(-6), 
+      email, 
+      password, 
+      department: 'General',
+      designation: 'Staff',
+      role: role || 'TEACHER'
     });
 
     const token = generateToken(teacher._id);
@@ -104,6 +107,7 @@ const getMe = async (req, res) => {
         profileImage: teacher.profileImage,
         faceRegisteredAt: teacher.faceRegisteredAt,
         faceRegistered: !!teacher.faceRegisteredAt,
+        role: teacher.role,
         createdAt: teacher.createdAt,
       },
     },

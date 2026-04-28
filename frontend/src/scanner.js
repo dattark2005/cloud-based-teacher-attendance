@@ -13,9 +13,8 @@ let fpsFrames     = 0;
 const WS_URL = `ws://localhost:8000/ws/live-detect`;
 
 // ── Animated box interpolation for smooth box rendering ────────────────────
-// We store "current" boxes and smoothly animate toward "target" boxes
-let currentBoxes = [];   // [{x,y,w,h,conf,identified,label}]
-const LERP = 0.35;       // interpolation factor  (0=frozen, 1=snap)
+// Removed LERP interpolation because YuNet does not provide consistent face indices
+// between frames, causing boxes to criss-cross when multiple faces are detected.
 
 // ── HTML ───────────────────────────────────────────────────────────────────
 export function renderScanner() {
@@ -25,8 +24,8 @@ export function renderScanner() {
 
     <div class="page-header flex items-center justify-between">
       <div>
-        <h1>📸 Live Scanner</h1>
-        <p class="text-muted">Real-time face detection — auto-mark teacher attendance</p>
+        <h1 id="scanner-title">📸 Live Scanner</h1>
+        <p class="text-muted" id="scanner-desc">Real-time face detection — auto-mark teacher attendance</p>
       </div>
       <div class="flex gap-2" style="align-items:center">
         <span id="scan-clock" class="badge badge-blue" style="font-size:14px;padding:8px 16px"></span>
@@ -42,8 +41,12 @@ export function renderScanner() {
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-bold">Camera Feed</h3>
           <div class="flex gap-2">
-            <button class="btn btn-ghost btn-sm" id="btn-toggle-scan">▶ Start Scanning</button>
-            <button class="btn btn-danger btn-sm"  id="btn-stop-cam">⏹ Stop</button>
+            <select id="camera-mode" class="form-input form-select" style="min-width: 140px; background: var(--bg2); padding: 8px 16px; font-size: 13px;">
+              <option value="IN">🚪 IN Gate Mode</option>
+              <option value="OUT">🏃 OUT Gate Mode</option>
+            </select>
+            <button class="btn btn-ghost btn-sm" id="btn-toggle-scan">▶ Start</button>
+            <button class="btn btn-danger btn-sm" id="btn-stop-cam">⏹ Stop</button>
           </div>
         </div>
 
@@ -139,6 +142,32 @@ export async function initScanner() {
     fpsFrames = 0;
   }, 1000);
 
+  // Handle mode changes
+  const updateScannerMode = () => {
+    const mode = window.__scannerMode || 'CABIN';
+    const title = document.getElementById('scanner-title');
+    const desc = document.getElementById('scanner-desc');
+    const select = document.getElementById('camera-mode');
+    if (!title || !select) return;
+
+    if (mode === 'CABIN') {
+      title.innerHTML = '🏫 Teacher Attendance';
+      desc.innerHTML = 'Official check-in and check-out for the day';
+      select.innerHTML =
+        '<option value="CABIN_IN">👨‍🏫 Check-In (Start Day)</option>' +
+        '<option value="CABIN_OUT">🚪 Check-Out (End Day)</option>';
+    } else {
+      title.innerHTML = '📸 Gate Cameras';
+      desc.innerHTML = 'Monitor campus entries and exits during the day';
+      select.innerHTML =
+        '<option value="GATE_IN">🚪 IN Gate (Return)</option>' +
+        '<option value="GATE_OUT">🏃 OUT Gate (Leave)</option>';
+    }
+  };
+  document.addEventListener('scannerModeChanged', updateScannerMode);
+  updateScannerMode(); // call initially
+
+
   // ── Start Camera ────────────────────────────────────────────
   document.getElementById('btn-start-cam').addEventListener('click', async () => {
     try {
@@ -158,11 +187,11 @@ export async function initScanner() {
     stopCamera(cameraStream);
     cameraStream = null;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    currentBoxes = [];
     document.getElementById('cam-overlay').style.display = 'flex';
     document.getElementById('cam-hud').style.display     = 'none';
-    document.getElementById('btn-toggle-scan').textContent = '▶ Start Scanning';
+    document.getElementById('btn-toggle-scan').textContent = '▶ Start';
     document.getElementById('btn-manual-checkin').disabled = true;
+    document.getElementById('camera-mode').disabled = false;
     setBadge(false);
   });
 
@@ -173,11 +202,13 @@ export async function initScanner() {
     if (isScanning) {
       teardown();
       lastCheckedIn = new Set();   // reset so teachers can re-check-in after pause
-      document.getElementById('btn-toggle-scan').textContent = '▶ Start Scanning';
+      document.getElementById('btn-toggle-scan').textContent = '▶ Start';
+      document.getElementById('camera-mode').disabled = false;
       setHud('Paused', false);
     } else {
       startScan(video, canvas, ctx);
       document.getElementById('btn-toggle-scan').textContent = '⏸ Pause';
+      document.getElementById('camera-mode').disabled = true;
       setHud('Connecting…', true);
     }
   });
@@ -226,17 +257,12 @@ export async function initScanner() {
       const y = box.y * scaleY;
       const w = box.w * scaleX;
       const h = box.h * scaleY;
-      const isIdentified = identified && i === 0;
 
-      // ── Animated smooth interpolation toward target box ──────
-      if (!currentBoxes[i]) currentBoxes[i] = { x, y, w, h };
-      else {
-        currentBoxes[i].x = lerp(currentBoxes[i].x, x, LERP);
-        currentBoxes[i].y = lerp(currentBoxes[i].y, y, LERP);
-        currentBoxes[i].w = lerp(currentBoxes[i].w, w, LERP);
-        currentBoxes[i].h = lerp(currentBoxes[i].h, h, LERP);
-      }
-      const bx = currentBoxes[i];
+      // Per-face identity from faceIdentities array
+      const faceId = (latestResult.faceIdentities || [])[i] || {};
+      const isIdentified = faceId.identified === true;
+      const fName = faceId.teacherName || null;
+      const fConf = faceId.confidence || 0;
 
       // ── Glow shadow ──────────────────────────────────────────
       const color = isIdentified ? '#00ff88' : '#00d4ff';
@@ -246,23 +272,23 @@ export async function initScanner() {
       // ── Bounding box ─────────────────────────────────────────
       ctx.strokeStyle = color;
       ctx.lineWidth   = 2.5;
-      ctx.strokeRect(bx.x, bx.y, bx.w, bx.h);
+      ctx.strokeRect(x, y, w, h);
 
       // Corner accents
-      drawCorners(ctx, bx.x, bx.y, bx.w, bx.h, color, 18, 3);
+      drawCorners(ctx, x, y, w, h, color, 18, 3);
 
       ctx.shadowBlur = 0;
 
       // ── Label pill ───────────────────────────────────────────
       const label     = isIdentified
-        ? `${teacherName}  ${Math.round((confidence || 0) * 100)}%`
+        ? `${fName}  ${Math.round((fConf || 0) * 100)}%`
         : `Unknown  ${Math.round((box.conf || 0) * 100)}%`;
-      const fontSize  = Math.max(12, Math.min(15, bx.w * 0.09));
+      const fontSize  = Math.max(12, Math.min(15, w * 0.09));
       ctx.font        = `600 ${fontSize}px Inter, sans-serif`;
       const textW     = ctx.measureText(label).width;
       const pillH     = fontSize + 10;
-      const pillX     = bx.x;
-      const pillY     = bx.y - pillH - 4;
+      const pillX     = x;
+      const pillY     = y - pillH - 4;
 
       // Pill background
       ctx.fillStyle = color;
@@ -274,16 +300,12 @@ export async function initScanner() {
       ctx.fillStyle   = isIdentified ? '#000' : '#000';
       ctx.fillText(label, pillX + 8, pillY + pillH - 6);
     });
-
-    // Trim stale boxes if fewer faces returned
-    currentBoxes = currentBoxes.slice(0, faceBoxes.length);
   }
 
   // ── Start scan: open WS + rAF loop ──────────────────────────
   function startScan(video, canvas, ctx) {
     isScanning   = true;
     pendingFrame = false;
-    currentBoxes = [];
     latestResult = null;
 
     // Start overlay draw loop
@@ -313,10 +335,24 @@ export async function initScanner() {
       const el = document.getElementById('hud-frames');
       if (el) el.textContent = `${++framesSent} frames sent`;
 
-      // Update side panel
-      if (data.identified && data.teacherName) {
-        renderDetected(data);
+      // Process ALL identified faces from faceIdentities array
+      const faceIds = data.faceIdentities || [];
+      const identified = faceIds.filter(f => f.identified);
+
+      if (identified.length > 0) {
+        renderDetectedAll(identified);
+        // Auto check-in every identified teacher that hasn't been checked in yet
+        for (const face of identified) {
+          if (!lastCheckedIn.has(face.userId)) {
+            lastCheckedIn.add(face.userId);
+            await doCheckIn(face, false);
+          }
+        }
+      } else if (data.identified && data.teacherName) {
+        // fallback to legacy single-identity
+        renderDetectedAll([data]);
         if (!lastCheckedIn.has(data.userId)) {
+          lastCheckedIn.add(data.userId);
           await doCheckIn(data, false);
         }
       }
@@ -372,25 +408,44 @@ export async function initScanner() {
 // ── Check-in via REST ──────────────────────────────────────────────────────
 async function doCheckIn(identity, manual) {
   try {
+    const type = document.getElementById('camera-mode')?.value || 'CABIN_IN';
     const res = await apiFetch('/attendance/camera-scan', {
       method: 'POST',
-      body: JSON.stringify({ userId: identity.userId }),
+      body: JSON.stringify({ userId: identity.userId, type }),
     });
-    if (res.data?.autoCheckedIn || manual) {
-      lastCheckedIn.add(identity.userId);
-      showToast(`✅ ${identity.teacherName}`, 'Check-in recorded!', 'success');
+
+    // Always add to cooldown set after a response — prevents hammering the API
+    // (Already added synchronously before the await to prevent parallel spam)
+    lastCheckedIn.add(identity.userId);
+
+    if (res.data?.autoCheckedIn) {
+      const labels = {
+        CABIN_IN:  'Cabin Check-In',
+        CABIN_OUT: 'Cabin Check-Out',
+        GATE_IN:   'Gate Return',
+        GATE_OUT:  'Gate Exit',
+      };
+      showToast(`✅ ${identity.teacherName}`, `${labels[type] || type} recorded!`, 'success');
       await loadTodayLog();
+    } else if (manual) {
+      showToast(`ℹ️ ${identity.teacherName}`, res.data?.reason || 'No action taken', 'info');
     }
   } catch { /* already checked-in or transient error */ }
 }
 
-// ── Render detected-teacher card ───────────────────────────────────────────
-function renderDetected(data) {
-  const pct  = Math.round((data.confidence || 0) * 100);
-  const name = data.teacherName || 'Unknown';
-  document.getElementById('detected-panel').innerHTML = `
+
+// ── Render detected-teacher cards (all identified teachers) ───────────────────
+function renderDetectedAll(identities) {
+  if (!identities || !identities.length) return;
+  const panel = document.getElementById('detected-panel');
+  if (!panel) return;  // navigated away from scanner page
+
+  panel.innerHTML = identities.map(data => {
+    const pct  = Math.round((data.confidence || 0) * 100);
+    const name = data.teacherName || 'Unknown';
+    return `
     <div class="detected-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.08),rgba(0,180,216,0.08));
-         border:1px solid rgba(0,255,136,0.25)">
+         border:1px solid rgba(0,255,136,0.25);margin-bottom:10px">
       <div class="flex items-center gap-3 mb-3">
         <div class="teacher-avatar" style="background:linear-gradient(135deg,#00ff88,#00b4d8);
              color:#000;font-weight:800;font-size:18px">
@@ -409,11 +464,16 @@ function renderDetected(data) {
            background:${pct > 75 ? 'var(--success)' : 'var(--warning)'}"></div></div>
       <div class="mt-3 flex gap-2">
         <span class="badge badge-green" style="animation:pulse 1.4s infinite">🟢 Detected</span>
+        ${data.userId ? `<button class="btn btn-ghost btn-sm" onclick="window._showTeacherGateLogs('${data.userId}','${name}')">📋 Logs</button>` : ''}
       </div>
     </div>`;
+  }).join('');
 }
 
-// ── Today's log ────────────────────────────────────────────────────────────
+// Keep old single-detect for manual check-in fallback
+function renderDetected(data) { renderDetectedAll([data]); }
+
+// ── Today's log (scanner panel) ───────────────────────────────────────────────
 async function loadTodayLog() {
   try {
     const data = await apiFetch('/attendance/all');
@@ -423,7 +483,10 @@ async function loadTodayLog() {
       el.innerHTML = '<p class="text-dim text-sm text-center" style="padding:20px">No check-ins yet today</p>';
       return;
     }
-    el.innerHTML = logs.map(l => `
+    el.innerHTML = logs.map(l => {
+      const isCheckedIn = !!l.checkInTime;
+      const isOut       = !!l.checkOutTime;
+      return `
       <div class="flex items-center gap-3"
            style="padding:10px;background:var(--surface);border-radius:10px;border:1px solid var(--border)">
         <div class="teacher-avatar" style="width:36px;height:36px;font-size:13px">
@@ -431,12 +494,144 @@ async function loadTodayLog() {
         </div>
         <div style="flex:1">
           <div class="font-semibold text-sm">${l.teacherId?.fullName || 'Unknown'}</div>
-          <div class="text-dim" style="font-size:11px">${formatTime(l.checkInTime)}</div>
+          <div class="text-dim" style="font-size:11px">In: ${formatTime(l.checkInTime)}${l.checkOutTime ? ` · Out: ${formatTime(l.checkOutTime)}` : ''}</div>
         </div>
-        <span class="badge ${l.status === 'LATE' ? 'badge-yellow' : 'badge-green'}">${l.status}</span>
-      </div>`).join('');
+        <div class="flex gap-1 flex-col items-end">
+          <span class="badge badge-green">${l.status}</span>
+          ${isCheckedIn && l.teacherId?._id ? `<button class="btn btn-ghost" style="font-size:10px;padding:2px 8px" onclick="window._showTeacherGateLogs('${l.teacherId._id}','${l.teacherId.fullName}')">📋 Logs</button>` : ''}
+        </div>
+      </div>`;
+    }).join('');
   } catch { /* silent */ }
 }
+
+// ── Teacher sessions log modal ────────────────────────────────────────────────
+window._showTeacherGateLogs = async function(teacherId, teacherName) {
+  document.getElementById('gate-log-modal')?.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'gate-log-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.78);display:flex;' +
+    'align-items:center;justify-content:center;backdrop-filter:blur(6px)';
+  modal.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:20px;
+                padding:28px 28px 24px;min-width:380px;max-width:520px;width:93%;
+                max-height:82vh;overflow-y:auto;box-shadow:0 24px 64px rgba(0,0,0,0.55)">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h3 class="font-bold" style="font-size:16px">\u{1F4CB} ${teacherName}</h3>
+          <div style="font-size:11px;color:#666;margin-top:2px">Today's Sessions</div>
+        </div>
+        <button onclick="document.getElementById('gate-log-modal').remove()"
+                style="background:none;border:none;color:#aaa;font-size:22px;cursor:pointer;padding:4px">\u2715</button>
+      </div>
+      <div id="gate-log-list"><p class="text-dim text-sm">Loading\u2026</p></div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+  try {
+    const res  = await apiFetch('/attendance/teacher-logs/' + teacherId);
+    const d    = res.data;
+    const list = document.getElementById('gate-log-list');
+
+    if (!d || !d.sessions || !d.sessions.length) {
+      list.innerHTML = `
+        <div style="text-align:center;padding:32px;color:#555">
+          <div style="font-size:40px;margin-bottom:10px">\u{1F3EB}</div>
+          <p>No cabin sessions recorded today.</p>
+        </div>`;
+      return;
+    }
+
+    // Build HTML for each session
+    const sessionsHtml = d.sessions.map((session, idx) => {
+      const isOpen      = session.isOpen;
+      const borderColor = isOpen ? '#00ff88' : '#333';
+      const bgColor     = isOpen ? 'rgba(0,255,136,0.03)' : 'var(--bg2)';
+      const glowStyle   = isOpen ? 'box-shadow:0 0 0 1px rgba(0,255,136,0.25)' : '';
+
+      // Build timeline rows
+      const rows = [];
+
+      // Row 1: Cabin IN
+      rows.push({
+        icon:  '\u{1F468}\u200D\u{1F3EB}',
+        label: 'Cabin Check-In',
+        time:  formatTime(session.cabinInTime),
+        color: 'var(--success)',
+        connector: true,
+      });
+
+      // Middle: gate movements
+      (session.movements || []).forEach(m => {
+        rows.push({
+          icon:      m.type === 'GATE_OUT' ? '\u{1F3C3}' : '\u{1F4E5}',
+          label:     m.type === 'GATE_OUT' ? 'Left via Gate' : 'Returned via Gate',
+          time:      formatTime(m.timestamp),
+          color:     m.type === 'GATE_OUT' ? '#f59e0b' : '#00b4d8',
+          connector: true,
+        });
+      });
+
+      // Last row: Cabin OUT or still-in
+      if (session.cabinOutTime) {
+        rows.push({ icon: '\u{1F6AA}', label: 'Cabin Check-Out', time: formatTime(session.cabinOutTime), color: '#f97316', connector: false });
+      } else {
+        const gateNote = session.currentGateState === 'OUT' ? '(currently outside)' : '(currently inside)';
+        rows.push({ icon: '\u23F3', label: 'Session open', time: gateNote, color: '#555', connector: false, dimmed: true });
+      }
+
+      const rowsHtml = rows.map(r => `
+        <div style="display:flex;gap:12px;align-items:flex-start;${r.dimmed ? 'opacity:.45' : ''}">
+          <div style="display:flex;flex-direction:column;align-items:center;width:36px;flex-shrink:0">
+            <div style="width:34px;height:34px;border-radius:50%;background:${r.color}18;border:1.5px solid ${r.color};
+                        display:flex;align-items:center;justify-content:center;font-size:16px">${r.icon}</div>
+            ${r.connector ? `<div style="width:2px;min-height:14px;flex:1;background:linear-gradient(${r.color},#333);margin:2px 0"></div>` : ''}
+          </div>
+          <div style="padding:6px 0 ${r.connector ? '12px' : '0'}">
+            <div style="font-weight:600;font-size:13px;color:${r.color}">${r.label}</div>
+            <div style="font-size:11px;color:#777;margin-top:1px">${r.time}</div>
+          </div>
+        </div>`).join('');
+
+      return `
+      <div style="border:1.5px solid ${borderColor};border-radius:14px;padding:16px;margin-bottom:12px;
+                  background:${bgColor};${glowStyle}">
+        <div class="flex items-center justify-between" style="margin-bottom:12px">
+          <span style="font-size:11px;color:#777;font-weight:700;letter-spacing:.06em">SESSION ${idx + 1}</span>
+          <div class="flex gap-1">
+            ${isOpen ? '<span class="badge badge-green" style="font-size:10px;animation:pulse 1.4s infinite">\u25cf ACTIVE</span>' : ''}
+            <span class="badge badge-green" style="font-size:10px">${session.status}</span>
+          </div>
+        </div>
+        ${rowsHtml}
+      </div>`;
+    }).join('');
+
+    // Day summary bar
+    const totalSessions = d.sessions.length;
+    const openCount     = d.sessions.filter(s => s.isOpen).length;
+    const summaryHtml = `
+      <div style="background:var(--bg2);border-radius:10px;padding:11px 14px;margin-bottom:14px;
+                  display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+        <div style="font-size:12px;color:#888">
+          <strong style="color:#fff">${totalSessions}</strong> session${totalSessions !== 1 ? 's' : ''} today
+          \u00b7 First in: <strong style="color:#fff">${d.checkInTime ? formatTime(d.checkInTime) : '\u2014'}</strong>
+          \u00b7 <span class="badge badge-green" style="font-size:10px">${d.status}</span>
+        </div>
+        ${openCount
+          ? '<span style="font-size:11px;color:#00ff88">\u25cf Currently in cabin</span>'
+          : '<span style="font-size:11px;color:#555">All sessions closed</span>'}
+      </div>`;
+
+    list.innerHTML = summaryHtml + sessionsHtml;
+
+  } catch(e) {
+    document.getElementById('gate-log-list').innerHTML =
+      `<p class="text-dim text-sm">Error loading sessions: ${e.message}</p>`;
+  }
+};
 
 // ── HUD / badge helpers ────────────────────────────────────────────────────
 function setHud(text, active) {

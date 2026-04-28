@@ -51,19 +51,11 @@ const registerFace = async (req, res, next) => {
       faceImageUrl = pyRes.data.imageUrl;
       registered = pyRes.data.success;
     } catch (serviceErr) {
-      console.warn('⚠️  Python face service unavailable — saving image as fallback');
-      // Fallback: upload to Cloudinary directly
-      try {
-        const uploadRes = await new Promise((resolve, reject) => {
-          const uploadStream = cloudinary.uploader.upload_stream(
-            { folder: 'teacher_attendance/faces', public_id: `teacher_${teacherId}` },
-            (err, res) => (err ? reject(err) : resolve(res))
-          );
-          require('stream').Readable.from(imageBuffer).pipe(uploadStream);
-        });
-        faceImageUrl = uploadRes.secure_url;
-      } catch (_) {}
-      registered = true; // fallback mode
+      if (serviceErr.response && serviceErr.response.data && serviceErr.response.data.detail) {
+        return res.status(400).json({ success: false, message: serviceErr.response.data.detail });
+      }
+      console.warn('⚠️  Python face service unavailable:', serviceErr.message);
+      return res.status(500).json({ success: false, message: 'Face service is unavailable or returned an error.' });
     }
 
     // Only mark face as registered if the Python service confirmed success
@@ -143,7 +135,7 @@ const getProfile = async (req, res, next) => {
 const getAllTeachers = async (req, res, next) => {
   try {
     const today = getTodayDateString();
-    const teachers = await Teacher.find({ isActive: true }).sort({ fullName: 1 });
+    const teachers = await Teacher.find({ isActive: true, role: 'TEACHER' }).sort({ fullName: 1 });
 
     const teacherIds = teachers.map(t => t._id);
     const todayLogs = await AttendanceLog.find({ teacherId: { $in: teacherIds }, date: today });

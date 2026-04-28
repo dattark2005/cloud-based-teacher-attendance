@@ -77,8 +77,17 @@ export function captureFrame(videoEl, canvasEl) {
 // ── Navigate ──
 export function navigate(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  const el = document.getElementById(`page-${page}`);
+  
+  let targetId = `page-${page}`;
+  if (page === 'scanner-cabin' || page === 'scanner-gate') {
+    targetId = 'page-scanner';
+    window.__scannerMode = page === 'scanner-cabin' ? 'CABIN' : 'GATE';
+    document.dispatchEvent(new Event('scannerModeChanged'));
+  }
+  
+  const el = document.getElementById(targetId);
   if (el) el.classList.add('active');
+  
   document.querySelectorAll('.nav-item').forEach(n => {
     n.classList.toggle('active', n.dataset.page === page);
   });
