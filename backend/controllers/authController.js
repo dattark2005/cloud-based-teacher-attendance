@@ -11,6 +11,7 @@ const formatTeacher = (t) => ({
   email: t.email,
   department: t.department,
   designation: t.designation,
+  role: t.role || 'faculty',
   profileImage: t.profileImage || null,
   faceImageUrl: t.faceImageUrl || null,
   faceRegistered: !!t.faceRegisteredAt,
@@ -21,7 +22,7 @@ const formatTeacher = (t) => ({
 // POST /api/auth/register
 const register = async (req, res, next) => {
   try {
-    const { fullName, employeeId, email, password, department, designation, phone } = req.body;
+    const { fullName, employeeId, email, password, department, role, phone, designation } = req.body;
 
     if (!fullName || !employeeId || !email || !password || !department) {
       return res.status(400).json({ success: false, message: 'All required fields must be provided' });
@@ -34,10 +35,12 @@ const register = async (req, res, next) => {
       return res.status(409).json({ success: false, message: `${field} already exists` });
     }
 
+    const teacherRole = role === 'admin' ? 'admin' : 'faculty';
+
     const teacher = await Teacher.create({
-      fullName, employeeId, email, password, department,
-      designation: designation || 'Assistant Professor',
+      fullName, employeeId, email, password, department, role: teacherRole,
       phone: phone || null,
+      designation: designation || 'Assistant Professor',
     });
 
     const token = generateToken(teacher._id);
@@ -59,7 +62,7 @@ const register = async (req, res, next) => {
 // POST /api/auth/login
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, role } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ success: false, message: 'Email and password are required' });
@@ -72,6 +75,10 @@ const login = async (req, res, next) => {
 
     if (!teacher.isActive) {
       return res.status(403).json({ success: false, message: 'Account is deactivated' });
+    }
+
+    if (role && teacher.role !== role) {
+      return res.status(403).json({ success: false, message: `Access denied. You do not have the ${role} role.` });
     }
 
     const token = generateToken(teacher._id);
@@ -101,6 +108,7 @@ const getMe = async (req, res) => {
         email: teacher.email,
         department: teacher.department,
         designation: teacher.designation,
+        role: teacher.role || 'faculty',
         profileImage: teacher.profileImage,
         faceRegisteredAt: teacher.faceRegisteredAt,
         faceRegistered: !!teacher.faceRegisteredAt,

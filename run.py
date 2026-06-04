@@ -3,9 +3,13 @@
 |        Teacher Attendance System -- Master Launcher      |
 |  Starts:                                                 |
 |    [1] Python Face Service  (REST + WS live-detect) :8000|
-|    [2] Node.js Backend                              :5000 |
-|    [3] Vite Frontend                                :3000 |
-|  Usage:  python run.py                                   |
+|    [2] Python Voice Service (resemblyzer)           :8001|
+|    [3] Node.js Backend                              :5000 |
+|    [4] Vite Frontend                                :3000 |
+|                                                          |
+|  Usage:                                                  |
+|    python run.py           ← start all services          |
+|    python run.py --test    ← check imports + run tests   |
 +----------------------------------------------------------+
 """
 
@@ -29,6 +33,7 @@ os.system("")
 ROOT         = Path(__file__).parent.resolve()
 BACKEND_DIR  = ROOT / "backend"
 FRONTEND_DIR = ROOT / "frontend"
+REQ_FILE     = ROOT / "requirements.txt"
 
 # ── ANSI colors ──────────────────────────────────────────────────────────────
 RESET   = "\033[0m"
@@ -109,7 +114,154 @@ def shutdown(sig=None, frame=None):
 signal.signal(signal.SIGINT,  shutdown)
 signal.signal(signal.SIGTERM, shutdown)
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TEST MODE  —  python run.py --test
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Maps import-name → pip package name
+IMPORT_TO_PKG = {
+    "fastapi":       "fastapi>=0.110.0",
+    "uvicorn":       "uvicorn[standard]>=0.29.0",
+    "motor":         "motor>=3.4.0",
+    "PIL":           "pillow>=10.3.0",
+    "numpy":         "numpy>=1.26.4",
+    "cv2":           "opencv-contrib-python>=4.9.0.80",
+    "cloudinary":    "cloudinary>=1.39.0",
+    "dotenv":        "python-dotenv>=1.0.1",
+    "multipart":     "python-multipart>=0.0.9",
+    "httpx":         "httpx>=0.27.0",
+    "bson":          "pymongo>=4.6.0",
+    "pytest":        "pytest>=8.0.0",
+    "starlette":     "starlette>=0.36.0",
+    "websockets":    "websockets>=12.0",
+    "resemblyzer":   "resemblyzer>=0.1.1.dev0",
+    "librosa":       "librosa>=0.10.0",
+    "soundfile":     "soundfile>=0.12.1",
+}
+
+PKG_INSTALL_NAME = {
+    "fastapi":       "fastapi",
+    "uvicorn":       "uvicorn[standard]",
+    "motor":         "motor",
+    "PIL":           "pillow",
+    "numpy":         "numpy",
+    "cv2":           "opencv-contrib-python",
+    "cloudinary":    "cloudinary",
+    "dotenv":        "python-dotenv",
+    "multipart":     "python-multipart",
+    "httpx":         "httpx",
+    "bson":          "pymongo",
+    "pytest":        "pytest",
+    "starlette":     "starlette",
+    "websockets":    "websockets",
+    "resemblyzer":   "resemblyzer",
+    "librosa":       "librosa",
+    "soundfile":     "soundfile",
+}
+
+
+def check_and_install_imports():
+    """Check every package face_service.py needs. Auto-install if missing."""
+    import importlib
+    print(c(BOLD+WHITE, "  [1/3] Checking Python imports...\n"))
+    missing = []
+    for mod, req in IMPORT_TO_PKG.items():
+        try:
+            importlib.import_module(mod)
+            print(c(GREEN,  f"  [OK] import {mod}"))
+        except ImportError:
+            print(c(YELLOW, f"  [!]  import {mod}  → MISSING"))
+            missing.append((mod, req))
+
+    if not missing:
+        print(c(GREEN, "\n  [OK] All packages present"))
+        return
+
+    print(c(YELLOW, f"\n  [*]  Auto-installing {len(missing)} missing package(s)..."))
+    for mod, req in missing:
+        name = PKG_INSTALL_NAME[mod]
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", name, "--quiet"],
+            capture_output=True, text=True
+        )
+        if r.returncode == 0:
+            print(c(GREEN, f"  [OK] Installed {name}"))
+        else:
+            print(c(RED,   f"  [!!] Failed: {name}"))
+            print(r.stderr[:300])
+
+    # Update requirements.txt
+    existing = REQ_FILE.read_text(encoding="utf-8") if REQ_FILE.exists() else ""
+    lines = [l.strip() for l in existing.splitlines() if l.strip()]
+    added = []
+    for mod, req in missing:
+        base = req.split(">=")[0].split("[")[0]
+        if not any(base.lower() in l.lower() for l in lines):
+            lines.append(req)
+            added.append(req)
+    if added:
+        REQ_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        for a in added:
+            print(c(CYAN, f"  [+]  Added to requirements.txt: {a}"))
+
+
+def run_python_tests():
+    """Run pytest on tests/ directory."""
+    print()
+    print(c(BOLD+WHITE, "  [2/3] Running Python tests (pytest)...\n"))
+    test_files = list((ROOT / "tests").glob("test_*.py"))
+    if not test_files:
+        print(c(YELLOW, "  [!]  No Python test files found in tests/"))
+        return True
+    args = [sys.executable, "-m", "pytest"] + [str(f) for f in test_files] + ["-v", "--tb=short", "--no-header"]
+    r = subprocess.run(args, cwd=str(ROOT))
+    return r.returncode == 0
+
+
+def run_js_tests():
+    """Run Jest tests in backend/."""
+    print()
+    print(c(BOLD+WHITE, "  [3/3] Running Node.js tests (Jest)...\n"))
+    if not (BACKEND_DIR / "node_modules").exists():
+        print(c(YELLOW, "  [*]  Installing backend npm deps first..."))
+        subprocess.run(["npm", "install"], cwd=str(BACKEND_DIR), shell=True)
+    r = subprocess.run(
+        ["npm", "test", "--", "--forceExit", "--verbose"],
+        cwd=str(BACKEND_DIR), shell=True
+    )
+    return r.returncode == 0
+
+
+def run_tests():
+    print_banner()
+    print(c(CYAN, "  MODE: TEST\n"))
+
+    check_and_install_imports()
+    py_ok = run_python_tests()
+    js_ok = run_js_tests()
+
+    # ── Final summary ──────────────────────────────────────────────────────
+    print()
+    print(c(CYAN,  "  +================================================+"))
+    print(c(CYAN,  "  |") + c(BOLD, "       TEST RUNNER — FINAL REPORT             ") + c(CYAN, "|"))
+    print(c(CYAN,  "  +================================================+"))
+    py_s = c(GREEN+BOLD, "PASSED ✓") if py_ok else c(RED+BOLD, "FAILED ✗")
+    js_s = c(GREEN+BOLD, "PASSED ✓") if js_ok else c(RED+BOLD, "FAILED ✗")
+    print(c(CYAN,  "  |") + f"  Python tests (pytest)  : {py_s}         " + c(CYAN, "|"))
+    print(c(CYAN,  "  |") + f"  Node.js tests (Jest)   : {js_s}         " + c(CYAN, "|"))
+    overall = c(GREEN+BOLD, "ALL SYSTEMS GO ✓") if (py_ok and js_ok) else c(RED+BOLD, "ISSUES FOUND ✗")
+    print(c(CYAN,  "  +================================================+"))
+    print(c(CYAN,  "  |") + f"  Overall : {overall}" + " " * 21 + c(CYAN, "|"))
+    print(c(CYAN,  "  +================================================+"))
+    print()
+    sys.exit(0 if (py_ok and js_ok) else 1)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAUNCH MODE  —  python run.py
+# ══════════════════════════════════════════════════════════════════════════════
+
 def main():
     print_banner()
 
@@ -120,7 +272,7 @@ def main():
     print()
 
     # Step 2 — Python Face Service (port 8000)
-    print(c(BOLD+WHITE, "  [2/4] Starting Python Face Service on :8000...\n"))
+    print(c(BOLD+WHITE, "  [1/5] Starting Python Face Service on :8000...\n"))
     face_proc = subprocess.Popen(
         [sys.executable, "face_service.py"],
         cwd=str(ROOT),
@@ -137,8 +289,28 @@ def main():
     wait_for_service("http://localhost:8000/health", "Face Service", MAGENTA, timeout=90)
     print()
 
+    # Step 2b — Python Voice Service (port 8001)
+    voice_svc_file = ROOT / "voice_service.py"
+    if voice_svc_file.exists():
+        print(c(BOLD+WHITE, "  [2/5] Starting Python Voice Service on :8001...\n"))
+        voice_proc = subprocess.Popen(
+            [sys.executable, "voice_service.py"],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            shell=False,
+        )
+        processes.append((voice_proc, "VoiceService"))
+        threading.Thread(
+            target=stream_output, args=(voice_proc, "VoiceService", CYAN), daemon=True
+        ).start()
+        wait_for_service("http://localhost:8001/health", "Voice Service", CYAN, timeout=30)
+    else:
+        print(c(YELLOW, "  [~] voice_service.py not found — skipping Voice Service"))
+    print()
+
     # Step 3 — Node.js Backend (port 5000)
-    print(c(BOLD+WHITE, "  [3/4] Starting Node.js Backend on :5000...\n"))
+    print(c(BOLD+WHITE, "  [3/5] Starting Node.js Backend on :5000...\n"))
     node_proc = subprocess.Popen(
         ["npm", "run", "dev"],
         cwd=str(BACKEND_DIR),
@@ -155,43 +327,49 @@ def main():
     print()
 
     # Step 4 — Vite Frontend (port 3000)
-    print(c(BOLD+WHITE, "  [4/4] Starting Vite Frontend on :3000...\n"))
+    # On Windows, Vite writes to stderr which gets swallowed by pipes.
+    # Launch in its own visible console window so output always shows.
+    print(c(BOLD+WHITE, "  [4/5] Starting Vite Frontend on :3000...\n"))
     vite_proc = subprocess.Popen(
-        ["npm", "run", "dev"],
+        'start "[Frontend] Vite Dev Server" cmd /k "npm run dev"',
         cwd=str(FRONTEND_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
         shell=True,
     )
     processes.append((vite_proc, "Frontend"))
-    threading.Thread(
-        target=stream_output, args=(vite_proc, "Frontend", BLUE), daemon=True
-    ).start()
 
-    # Give Vite a moment to bind the port
-    time.sleep(5)
+    # Wait until Vite actually binds port 3000
+    frontend_up = wait_for_service("http://localhost:3000", "Vite Frontend", BLUE, timeout=30)
+    print()
 
     # Ready banner
-    print()
     print(c(CYAN,   "  +================================================+"))
-    print(c(CYAN,   "  |") + c(BOLD+GREEN, "  [OK] All services are running!              ") + c(CYAN, "|"))
+    if frontend_up:
+        print(c(CYAN, "  |") + c(BOLD+GREEN, "  [OK] All services are running!              ") + c(CYAN, "|"))
+    else:
+        print(c(CYAN, "  |") + c(BOLD+YELLOW, "  [~]  Backend/Face up; Frontend may lag      ") + c(CYAN, "|"))
     print(c(CYAN,   "  +================================================+"))
-    print(c(CYAN,   "  |") + f"  {c(BLUE,'Frontend')}      ->  http://localhost:3000         " + c(CYAN, "|"))
-    print(c(CYAN,   "  |") + f"  {c(GREEN,'Backend')}       ->  http://localhost:5000         " + c(CYAN, "|"))
-    print(c(CYAN,   "  |") + f"  {c(MAGENTA,'Face API')}     ->  http://localhost:8000         " + c(CYAN, "|"))
-    print(c(CYAN,   "  |") + f"  {c(MAGENTA,'Live Detect')} ->  ws://localhost:8000/ws/live-detect" + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + f"  {c(BLUE,'Frontend')}      -> http://localhost:3000         " + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + f"  {c(GREEN,'Backend')}       -> http://localhost:5000         " + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + f"  {c(MAGENTA,'Face API')}     -> http://localhost:8000         " + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + f"  {c(CYAN,'Voice API')}    -> http://localhost:8001         " + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + f"  {c(MAGENTA,'Live Detect')} -> ws://localhost:8000/ws/live-detect" + c(CYAN, "|"))
     print(c(CYAN,   "  +================================================+"))
-    print(c(CYAN,   "  |") + c(YELLOW,     "  Press Ctrl+C to stop all services           ") + c(CYAN, "|"))
+    print(c(CYAN,   "  |") + c(YELLOW, "  Press Ctrl+C to stop all services           ") + c(CYAN, "|"))
     print(c(CYAN,   "  +================================================+"))
     print()
 
-    # Open browser
-    webbrowser.open("http://localhost:3000")
+    # Open browser once frontend is confirmed up
+    if frontend_up:
+        webbrowser.open("http://localhost:3000")
+    else:
+        print(c(YELLOW, "  [!] Open http://localhost:3000 manually once Vite finishes starting."))
 
-    # Keep alive — watch for unexpected crashes
+    # Keep alive — watch for unexpected crashes (skip Frontend; it has its own window)
     try:
         while True:
             for proc, label in processes:
+                if label == "Frontend":
+                    continue  # runs in its own cmd window; launcher exits 0 immediately
                 if proc.poll() is not None:
                     print(c(RED, f"\n  [!!] [{label}] crashed (exit {proc.returncode})"))
                     print(c(YELLOW, "  Fix the issue then re-run:  python run.py"))
@@ -202,4 +380,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--test" in sys.argv:
+        run_tests()
+    else:
+        main()
+

@@ -20,4 +20,12 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-module.exports = { authenticate };
+const authorizeAdmin = (req, res, next) => {
+  if (req.teacher && req.teacher.role === 'admin') {
+    next();
+  } else {
+    return res.status(403).json({ success: false, message: 'Access denied. Admin role required.' });
+  }
+};
+
+module.exports = { authenticate, authorizeAdmin };

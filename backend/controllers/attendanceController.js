@@ -101,6 +101,7 @@ const checkIn = async (req, res, next) => {
 
     const logEntry = {
       event: 'CHECK_IN',
+      method: verificationMethod,
       timestamp: now,
       confidence: confidenceScore,
       snapshotUrl,
@@ -108,11 +109,13 @@ const checkIn = async (req, res, next) => {
 
     let log;
     if (existing) {
-      // Already has a record (e.g. from a previous session), update it
       existing.checkInTime = now;
       existing.status = isLate ? 'LATE' : 'PRESENT';
       existing.confidenceScore = confidenceScore;
-      existing.verificationMethod = verificationMethod;
+      // Merge methods
+      const methods = new Set([...(existing.verificationMethods || []), verificationMethod]);
+      existing.verificationMethods = [...methods];
+      existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : verificationMethod;
       existing.snapshotUrl = snapshotUrl;
       existing.location = location;
       existing.logs.push(logEntry);
@@ -124,6 +127,7 @@ const checkIn = async (req, res, next) => {
         checkInTime: now,
         status: isLate ? 'LATE' : 'PRESENT',
         verificationMethod,
+        verificationMethods: [verificationMethod],
         confidenceScore,
         snapshotUrl,
         location,
@@ -279,11 +283,17 @@ const getHistory = async (req, res, next) => {
 const getAllAttendance = async (req, res, next) => {
   try {
     const { date = getTodayDateString() } = req.query;
-    const logs = await AttendanceLog.find({ date }).populate('teacherId', 'fullName employeeId department');
-    const teachers = await Teacher.find({ isActive: true }, 'fullName employeeId department');
+    const adminDept = req.teacher.department; // The admin's department
+
+    // Fetch all logs and filter in memory by department
+    const allLogs = await AttendanceLog.find({ date }).populate('teacherId', 'fullName employeeId department');
+    const logs = allLogs.filter(l => l.teacherId && l.teacherId.department === adminDept);
+
+    // Fetch teachers in the same department
+    const teachers = await Teacher.find({ isActive: true, department: adminDept }, 'fullName employeeId department');
 
     // Find absent teachers (no log for this date) — guard against null populate
-    const presentIds = new Set(logs.filter(l => l.teacherId).map(l => l.teacherId._id.toString()));
+    const presentIds = new Set(logs.map(l => l.teacherId._id.toString()));
     const absentTeachers = teachers.filter(t => !presentIds.has(t._id.toString()));
 
     res.json({
@@ -307,12 +317,11 @@ const getAllAttendance = async (req, res, next) => {
 
 // ─── CAMERA SCAN (identify from camera frame) ─────────────────────────────────
 
-// POST /api/attendance/camera-scan
 const cameraScan = async (req, res, next) => {
   try {
-    const { faceImage, userId: directUserId } = req.body;
+    const { faceImage, userId: directUserId, gate = 'in' } = req.body;
 
-    // ── Path A: WS live-detect already identified the teacher — just record check-in ──
+    // ── Path A: WS live-detect already identified the teacher — record check-in or check-out ──
     if (directUserId && !faceImage) {
       const teacher = await Teacher.findById(directUserId).select('fullName employeeId department faceImageUrl');
       if (!teacher) {
@@ -320,122 +329,250 @@ const cameraScan = async (req, res, next) => {
       }
       const today = getTodayDateString();
       const existing = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
+      const io = req.app.get('io');
+      const now = new Date();
+
+      const lastEvent = existing && existing.logs && existing.logs.length > 0
+        ? existing.logs[existing.logs.length - 1].event
+        : (existing && existing.checkInTime ? 'CHECK_IN' : null);
+
+      let isOutGate = gate === 'out';
+      if (gate === 'auto') {
+        isOutGate = (lastEvent === 'CHECK_IN');
+      }
+
+      if (isOutGate) {
+        // ── CHECK-OUT via OUT gate ──
+        if (!existing || lastEvent !== 'CHECK_IN') {
+          return res.json({ success: true, data: { identified: true, autoCheckedOut: false, alreadyCheckedOut: true, reason: 'Not checked in or already checked out' } });
+        }
+        existing.checkOutTime = now;
+        existing.logs.push({ event: 'CHECK_OUT', method: 'FACE', timestamp: now, confidence: null });
+        await existing.save();
+        if (io) io.emit('attendance:checkout', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now });
+        return res.json({
+          success: true,
+          data: { identified: true, teacher: { fullName: teacher.fullName }, autoCheckedOut: true, checkOutTime: now },
+        });
+      }
+
+      // ── CHECK-IN via IN gate ──
       let autoCheckedIn = false;
-      if (!existing || !existing.checkInTime) {
-        const now = new Date();
+      if (!existing || lastEvent !== 'CHECK_IN') {
         const isLate = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
-        const logEntry = { event: 'CHECK_IN', timestamp: now, confidence: null };
+        const logEntry = { event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: null };
         if (existing) {
-          existing.checkInTime = now;
-          existing.status = isLate ? 'LATE' : 'PRESENT';
-          existing.verificationMethod = 'FACE';
+          existing.checkInTime = existing.checkInTime || now;
+          existing.status = existing.checkInTime ? existing.status : (isLate ? 'LATE' : 'PRESENT');
+          const methods = new Set([...(existing.verificationMethods || []), 'FACE']);
+          existing.verificationMethods = [...methods];
+          existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'FACE';
           existing.logs.push(logEntry);
           await existing.save();
         } else {
           await AttendanceLog.create({
             teacherId: teacher._id, date: today, checkInTime: now,
-            status: isLate ? 'LATE' : 'PRESENT', verificationMethod: 'FACE',
+            status: isLate ? 'LATE' : 'PRESENT',
+            verificationMethod: 'FACE', verificationMethods: ['FACE'],
             location: 'Campus Entrance', logs: [logEntry],
           });
         }
         autoCheckedIn = true;
-        const io = req.app.get('io');
         if (io) io.emit('attendance:checkin', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now, status: isLate ? 'LATE' : 'PRESENT' });
+      } else {
+        // Already checked in. Make sure 'FACE' is in methods if they did voice first.
+        if (!existing.verificationMethods || !existing.verificationMethods.includes('FACE')) {
+          const methods = new Set([...(existing.verificationMethods || []), 'FACE']);
+          existing.verificationMethods = [...methods];
+          existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'FACE';
+          existing.logs.push({ event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: null });
+          await existing.save();
+        }
       }
       return res.json({
         success: true,
+        data: { identified: true, teacher: { fullName: teacher.fullName }, autoCheckedIn, alreadyCheckedIn: !autoCheckedIn, checkInTime: existing?.checkInTime || now },
+      });
+    }
+
+    // ── Path B: Legacy — faceImage base64 sent ──
+    if (!faceImage) {
+      return res.status(400).json({ success: false, message: 'Either faceImage or userId is required' });
+    }
+    
+    try {
+      const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+      const formData = new FormData();
+      formData.append('file', imageBuffer, { filename: 'identify.jpg', contentType: 'image/jpeg' });
+      
+      const pyRes = await axios.post(`${FACE_SERVICE_URL}/identify-face`, formData, {
+        headers: formData.getHeaders(),
+        timeout: 20000,
+      });
+
+      if (!pyRes.data.identified) {
+        return res.json({ success: true, data: { identified: false, reason: 'No match' } });
+      }
+
+      req.body.userId = pyRes.data.userId;
+      req.body.faceImage = null; // Clear to run Path A
+      return cameraScan(req, res, next);
+    } catch (err) {
+      console.warn('⚠️ Legacy identify failed:', err.message);
+      return res.json({ success: true, data: { identified: false, reason: 'Face service unavailable' } });
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── VOICE CHECK-IN ───────────────────────────────────────────────────────────
+
+// POST /api/attendance/voice-checkin
+const voiceCheckIn = async (req, res, next) => {
+  try {
+    const teacherId = req.teacher._id;
+    const similarity = parseFloat(req.body.similarity) || 1;
+
+    const today = getTodayDateString();
+    const existing = await AttendanceLog.findOne({ teacherId, date: today });
+    const teacher  = await Teacher.findById(teacherId).select('fullName');
+    const io       = req.app.get('io');
+    const now      = new Date();
+
+    const lastEvent = existing && existing.logs && existing.logs.length > 0
+        ? existing.logs[existing.logs.length - 1].event
+        : (existing && existing.checkInTime ? 'CHECK_IN' : null);
+
+    // If already checked in and NOT checked out, perform check-out!
+    if (existing && lastEvent === 'CHECK_IN') {
+      existing.checkOutTime = now;
+      
+      const logEntry = { event: 'CHECK_OUT', method: 'VOICE', timestamp: now, confidence: similarity };
+      if (!existing.logs) {
+        existing.logs = [];
+      }
+      existing.logs.push(logEntry);
+      
+      // Merge VOICE into methods
+      const currentMethods = existing.verificationMethods || [];
+      const methods = new Set([...currentMethods, 'VOICE']);
+      existing.verificationMethods = [...methods];
+      existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'VOICE';
+      existing.voiceSimilarity     = similarity;
+      
+      const log = await existing.save();
+
+      if (io) io.emit('attendance:checkout', {
+        teacherId: teacherId.toString(),
+        teacherName: teacher?.fullName,
+        timestamp: now,
+        method: log.verificationMethod
+      });
+
+      return res.json({
+        success: true,
         data: {
-          identified: true,
-          teacher: { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department, faceImageUrl: teacher.faceImageUrl },
-          confidence: null,
-          autoCheckedIn,
+          autoCheckedOut: true,
+          checkOutTime: now,
+          status: log.status,
+          verificationMethod: log.verificationMethod,
+          verificationMethods: log.verificationMethods,
         },
       });
     }
 
-    // ── Path B: Legacy — faceImage base64 sent, identify via Python service ──
-    if (!faceImage) {
-      return res.status(400).json({ success: false, message: 'Either faceImage or userId is required' });
-    }
-
-    const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
-    const formData = new FormData();
-    formData.append('file', imageBuffer, { filename: 'frame.jpg', contentType: 'image/jpeg' });
-
-    let identified = false;
-    let teacher = null;
-    let confidence = 0;
-
-    try {
-      const pyRes = await axios.post(`${FACE_SERVICE_URL}/identify-face`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 15000,
+    // If they already checked out, prevent checking in again or allow it?
+    if (existing && lastEvent === 'CHECK_OUT') {
+      return res.json({
+        success: true,
+        data: {
+          alreadyCheckedOut: true,
+          checkInTime: existing.checkInTime,
+          checkOutTime: existing.checkOutTime,
+        }
       });
-
-      if (pyRes.data.identified) {
-        identified = true;
-        confidence = pyRes.data.confidence;
-        teacher = await Teacher.findById(pyRes.data.userId).select('fullName employeeId department faceImageUrl');
-      }
-    } catch (err) {
-      return res.json({ success: true, data: { identified: false, reason: 'Face service unavailable' } });
     }
 
-    if (!identified || !teacher) {
-      return res.json({ success: true, data: { identified: false, reason: 'No match found' } });
+    const isLate   = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
+    const logEntry = { event: 'CHECK_IN', method: 'VOICE', timestamp: now, confidence: similarity };
+
+    let log;
+    if (existing) {
+      existing.checkInTime    = existing.checkInTime || now;
+      existing.status         = existing.checkInTime ? existing.status : (isLate ? 'LATE' : 'PRESENT');
+      // Merge VOICE into methods
+      const currentMethods = existing.verificationMethods || [];
+      const methods = new Set([...currentMethods, 'VOICE']);
+      existing.verificationMethods = [...methods];
+      existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'VOICE';
+      existing.voiceSimilarity     = similarity;
+      
+      if (!existing.logs) {
+        existing.logs = [];
+      }
+      existing.logs.push(logEntry);
+      log = await existing.save();
+    } else {
+      log = await AttendanceLog.create({
+        teacherId, date: today, checkInTime: now,
+        status: isLate ? 'LATE' : 'PRESENT',
+        verificationMethod: 'VOICE', verificationMethods: ['VOICE'],
+        voiceSimilarity: similarity, confidenceScore: similarity,
+        location: 'Voice Check-In',
+        logs: [logEntry],
+      });
     }
 
-    // Auto check-in if not already checked in
-    const today = getTodayDateString();
-    const existing = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
-    let autoCheckedIn = false;
-
-    if (!existing || !existing.checkInTime) {
-      const now = new Date();
-      const isLate = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
-      const logEntry = { event: 'CHECK_IN', timestamp: now, confidence };
-
-      if (existing) {
-        existing.checkInTime = now;
-        existing.status = isLate ? 'LATE' : 'PRESENT';
-        existing.confidenceScore = confidence;
-        existing.verificationMethod = 'FACE';
-        existing.logs.push(logEntry);
-        await existing.save();
-      } else {
-        await AttendanceLog.create({
-          teacherId: teacher._id, date: today, checkInTime: now,
-          status: isLate ? 'LATE' : 'PRESENT', verificationMethod: 'FACE',
-          confidenceScore: confidence, location: 'Campus Entrance', logs: [logEntry],
-        });
-      }
-      autoCheckedIn = true;
-
-      // Emit realtime event
-      const io = req.app.get('io');
-      if (io) {
-        io.emit('attendance:checkin', {
-          teacherId: teacher._id.toString(),
-          teacherName: teacher.fullName,
-          timestamp: now,
-          status: isLate ? 'LATE' : 'PRESENT',
-          confidence,
-        });
-      }
-    }
+    if (io) io.emit('attendance:checkin', {
+      teacherId: teacherId.toString(),
+      teacherName: teacher?.fullName,
+      timestamp: now,
+      status: log.status,
+      method: log.verificationMethod
+    });
 
     res.json({
       success: true,
       data: {
-        identified: true,
-        teacher: { id: teacher._id, fullName: teacher.fullName, employeeId: teacher.employeeId, department: teacher.department, faceImageUrl: teacher.faceImageUrl },
-        confidence,
-        autoCheckedIn,
+        autoCheckedIn: true,
+        checkInTime: log.checkInTime,
+        status: log.status,
+        verificationMethod: log.verificationMethod,
+        verificationMethods: log.verificationMethods,
       },
+    });
+  } catch (err) {
+    console.error('❌ voiceCheckIn error:', err);
+    next(err);
+  }
+};
+// ─── ADMIN: GET SPECIFIC TEACHER HISTORY ───────────────────────────────────────
+const getAdminTeacherHistory = async (req, res, next) => {
+  try {
+    const teacherId = req.params.id;
+    const teacher = await Teacher.findById(teacherId).select('-password -faceEncoding -faceImageData');
+    if (!teacher) {
+      return res.status(404).json({ success: false, message: 'Teacher not found' });
+    }
+
+    const logs = await AttendanceLog.find({ teacherId }).sort({ date: -1 });
+
+    const total = logs.length;
+    const present = logs.filter(l => l.status === 'PRESENT').length;
+    const late = logs.filter(l => l.status === 'LATE').length;
+
+    res.json({
+      success: true,
+      data: {
+        teacher,
+        stats: { total, present, late },
+        logs
+      }
     });
   } catch (err) {
     next(err);
   }
 };
 
-module.exports = { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan };
+module.exports = { checkIn, checkOut, getTodayStatus, getHistory, getAllAttendance, cameraScan, voiceCheckIn, getAdminTeacherHistory };

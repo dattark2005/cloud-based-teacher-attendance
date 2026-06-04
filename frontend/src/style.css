@@ -200,7 +200,7 @@ body {
 .sidebar-footer { padding: 16px 12px 0; border-top: 1px solid var(--border); }
 
 /* ── Main Content ── */
-.main-content { margin-left: 260px; min-height: 100vh; padding: 32px; }
+.main-content { margin-left: 260px; min-height: 100vh; padding: 32px; flex: 1; width: 100%; }
 .page-header { margin-bottom: 32px; }
 .page-header h1 { font-size: 28px; font-weight: 800; }
 .page-header p { color: var(--text2); margin-top: 4px; }
@@ -435,4 +435,88 @@ body {
   .main-content { margin-left: 0; padding: 20px; }
   .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
   .auth-card { padding: 32px 24px; }
+}
+
+/* ── Gate Toggle Bar ── */
+.gate-toggle-bar {
+  display: flex; align-items: center; gap: 16px; margin-bottom: 24px;
+  padding: 16px 20px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  flex-wrap: wrap;
+}
+.gate-toggle-label { font-size: 13px; font-weight: 700; color: var(--text2); white-space: nowrap; }
+.gate-toggle-group { display: flex; gap: 8px; }
+.gate-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 20px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border); background: var(--surface2);
+  color: var(--text2); font-family: inherit; font-size: 14px; font-weight: 600;
+  cursor: pointer; transition: var(--transition);
+}
+.gate-btn:hover { border-color: var(--border2); color: var(--text); }
+.gate-btn.active {
+  background: linear-gradient(135deg, rgba(108,99,255,0.25), rgba(0,212,170,0.1));
+  border-color: var(--primary); color: var(--primary-light);
+  box-shadow: 0 0 20px rgba(108,99,255,0.15);
+}
+.gate-badge { font-size: 10px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* ── Gate Status Pill ── */
+.gate-status-pill {
+  flex: 1; min-width: 200px; padding: 10px 16px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600;
+}
+.gate-in  { background: rgba(0,212,136,0.1);  color: #00d488; border: 1px solid rgba(0,212,136,0.3); }
+.gate-out { background: rgba(245,158,11,0.1); color: var(--warning); border: 1px solid rgba(245,158,11,0.3); }
+.gate-auto { background: rgba(108,99,255,0.1); color: var(--primary-light); border: 1px solid rgba(108,99,255,0.3); }
+
+/* ── Time Chip ── */
+.time-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600;
+}
+.time-chip.in  { background: rgba(0,212,136,0.12);  color: #00d488; border: 1px solid rgba(0,212,136,0.25); }
+.time-chip.out { background: rgba(245,158,11,0.12); color: var(--warning); border: 1px solid rgba(245,158,11,0.25); }
+
+/* ── Flex-wrap ── */
+.flex-wrap { flex-wrap: wrap; }
+
+/* ── Voice Ring ── */
+.voice-ring {
+  position: relative; width: 160px; height: 160px;
+  display: flex; align-items: center; justify-content: center;
+}
+.voice-ring-inner {
+  width: 100px; height: 100px; border-radius: 50%;
+  background: var(--surface2); border: 3px solid var(--border2);
+  display: flex; align-items: center; justify-content: center;
+  position: relative; z-index: 2; transition: var(--transition);
+}
+.voice-ring.recording .voice-ring-inner {
+  background: rgba(239,68,68,0.15); border-color: var(--danger);
+  box-shadow: 0 0 30px rgba(239,68,68,0.3);
+  animation: ring-pulse 0.8s ease-in-out infinite;
+}
+.voice-ring.success .voice-ring-inner {
+  background: rgba(16,185,129,0.15); border-color: var(--success);
+  box-shadow: 0 0 30px rgba(16,185,129,0.4);
+}
+.voice-ring.processing .voice-ring-inner {
+  border-color: var(--primary); box-shadow: 0 0 20px rgba(108,99,255,0.3);
+}
+@keyframes ring-pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+
+/* ── Voice Ripples ── */
+.voice-ripple {
+  position: absolute; border-radius: 50%; border: 2px solid rgba(239,68,68,0.4);
+  animation: ripple-out 1.5s ease-out infinite; opacity: 0;
+  display: none;
+}
+.voice-ring.recording .voice-ripple { display: block; }
+.voice-ripple.r1 { width: 120px; height: 120px; animation-delay: 0s; }
+.voice-ripple.r2 { width: 140px; height: 140px; animation-delay: 0.4s; }
+.voice-ripple.r3 { width: 160px; height: 160px; animation-delay: 0.8s; }
+@keyframes ripple-out {
+  0%   { transform: scale(0.8); opacity: 0.6; }
+  100% { transform: scale(1);   opacity: 0; }
 }

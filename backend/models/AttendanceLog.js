@@ -24,12 +24,25 @@ const attendanceLogSchema = new mongoose.Schema(
       enum: ['PRESENT', 'ABSENT', 'LATE'],
       default: 'PRESENT',
     },
+    // Primary method (backwards compat)
     verificationMethod: {
       type: String,
-      enum: ['FACE', 'FACE_LOCAL', 'MANUAL'],
+      enum: ['FACE', 'FACE_LOCAL', 'MANUAL', 'VOICE', 'FACE+VOICE'],
       default: 'FACE',
     },
+    // Array of ALL methods used — supports FACE, VOICE, or both
+    verificationMethods: {
+      type: [String],
+      enum: ['FACE', 'FACE_LOCAL', 'MANUAL', 'VOICE'],
+      default: [],
+    },
     confidenceScore: {
+      type: Number,
+      min: 0,
+      max: 1,
+      default: null,
+    },
+    voiceSimilarity: {
       type: Number,
       min: 0,
       max: 1,
@@ -43,13 +56,14 @@ const attendanceLogSchema = new mongoose.Schema(
       type: String,
       default: 'Campus Entrance',
     },
-    // For audit log — each scan creates a timestamped entry
+    // Per-event audit log
     logs: [
       {
-        event: { type: String, enum: ['CHECK_IN', 'CHECK_OUT'] },
-        timestamp: { type: Date, default: Date.now },
+        event:      { type: String, enum: ['CHECK_IN', 'CHECK_OUT'] },
+        method:     { type: String, enum: ['FACE', 'FACE_LOCAL', 'MANUAL', 'VOICE'] },
+        timestamp:  { type: Date, default: Date.now },
         confidence: { type: Number },
-        snapshotUrl: { type: String },
+        snapshotUrl:{ type: String },
       },
     ],
   },

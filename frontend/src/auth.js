@@ -18,6 +18,12 @@ export function renderAuthPage() {
     <!-- LOGIN FORM -->
     <div id="login-form">
       <form class="auth-form" id="login-form-el">
+        <div class="role-toggle" style="display:flex; gap:10px; margin-bottom:20px;">
+          <button type="button" class="btn btn-outline active w-full" id="role-faculty" style="border-radius:8px">👨‍🏫 Faculty</button>
+          <button type="button" class="btn btn-outline w-full" id="role-admin" style="border-radius:8px">🛡️ Admin</button>
+        </div>
+        <input type="hidden" id="login-role" value="faculty" />
+
         <div class="form-group">
           <label class="form-label">Email Address</label>
           <input type="email" id="login-email" class="form-input" placeholder="teacher@college.edu" required />
@@ -56,13 +62,10 @@ export function renderAuthPage() {
             <input type="text" id="reg-dept" class="form-input" placeholder="Computer Science" required />
           </div>
           <div class="form-group" style="grid-column:1/-1">
-            <label class="form-label">Designation</label>
-            <select id="reg-desig" class="form-input form-select">
-              <option>Assistant Professor</option>
-              <option>Associate Professor</option>
-              <option>Professor</option>
-              <option>HOD</option>
-              <option>Lab Instructor</option>
+            <label class="form-label">Role</label>
+            <select id="reg-role" class="form-input form-select">
+              <option value="faculty">Faculty</option>
+              <option value="admin">Admin</option>
             </select>
           </div>
           <div class="form-group" style="grid-column:1/-1">
@@ -94,6 +97,23 @@ export function initAuth(onSuccess) {
     document.getElementById('login-form').classList.remove('hidden');
   });
 
+  const btnFaculty = document.getElementById('role-faculty');
+  const btnAdmin = document.getElementById('role-admin');
+  const inputRole = document.getElementById('login-role');
+
+  if (btnFaculty && btnAdmin) {
+    btnFaculty.addEventListener('click', () => {
+      btnFaculty.classList.add('active');
+      btnAdmin.classList.remove('active');
+      inputRole.value = 'faculty';
+    });
+    btnAdmin.addEventListener('click', () => {
+      btnAdmin.classList.add('active');
+      btnFaculty.classList.remove('active');
+      inputRole.value = 'admin';
+    });
+  }
+
   // Login
   document.getElementById('login-form-el').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -106,6 +126,7 @@ export function initAuth(onSuccess) {
         body: JSON.stringify({
           email: document.getElementById('login-email').value,
           password: document.getElementById('login-password').value,
+          role: document.getElementById('login-role').value,
         }),
       });
       setAuth(data.data.token, data.data.teacher);
@@ -132,7 +153,7 @@ export function initAuth(onSuccess) {
           employeeId: document.getElementById('reg-empid').value.toUpperCase(),
           email: document.getElementById('reg-email').value,
           department: document.getElementById('reg-dept').value,
-          designation: document.getElementById('reg-desig').value,
+          role: document.getElementById('reg-role').value,
           password: document.getElementById('reg-password').value,
         }),
       });

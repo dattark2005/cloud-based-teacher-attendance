@@ -1,9 +1,11 @@
 import '/src/style.css';
+import { io } from 'socket.io-client';
 import { isLoggedIn, getTeacher, clearAuth, navigate, showToast } from './utils.js';
 import { renderAuthPage, initAuth } from './auth.js';
-import { renderDashboard, initDashboard } from './dashboard.js';
+import { renderDashboard, initDashboard, refreshDashboard } from './dashboard.js';
 import { renderScanner, initScanner } from './scanner.js';
 import { renderProfile, initProfile } from './profile.js';
+import { renderVoice, initVoice } from './voice.js';
 
 const app = document.getElementById('app');
 
@@ -36,6 +38,9 @@ function renderApp(teacher) {
       <div class="nav-item" data-page="scanner">
         <span class="nav-icon">📸</span> Camera Scanner
       </div>
+      <div class="nav-item" data-page="voice">
+        <span class="nav-icon">🎤</span> Voice Attendance
+      </div>
       <div class="nav-item" data-page="profile">
         <span class="nav-icon">👤</span> My Profile
       </div>
@@ -61,6 +66,7 @@ function renderApp(teacher) {
   <!-- Pages -->
   ${renderDashboard(teacher)}
   ${renderScanner()}
+  ${renderVoice()}
   ${renderProfile(teacher)}
   `;
 
@@ -71,6 +77,10 @@ function renderApp(teacher) {
 
   // Logout
   document.getElementById('btn-logout').addEventListener('click', () => {
+    if (socket) {
+      try { socket.disconnect(); } catch (_) {}
+      socket = null;
+    }
     clearAuth();
     showToast('Logged out', 'See you soon!', 'info');
     setTimeout(() => renderAuth(), 500);
@@ -80,19 +90,66 @@ function renderApp(teacher) {
   navigate('dashboard');
   initDashboard();
   initScanner();
+  initVoice();
   initProfile();
+}
+
+let socket = null;
+
+function connectSocket() {
+  if (socket) {
+    try { socket.disconnect(); } catch (_) {}
+  }
+  socket = io(window.location.origin);
+
+  socket.on('connect', () => console.log('🔌 Connected to Socket.io'));
+  socket.on('attendance:checkin', (data) => handleSocketEvent(data));
+  socket.on('attendance:checkout', (data) => handleSocketEvent(data));
+  socket.on('disconnect', () => console.log('❌ Disconnected from Socket.io'));
+}
+
+function handleSocketEvent(data) {
+  const teacher = getTeacher();
+  if (!teacher) return;
+
+  const isCurrentTeacher = teacher._id === data.teacherId || teacher.id === data.teacherId;
+
+  if (teacher.role === 'admin' || isCurrentTeacher) {
+    refreshDashboard();
+  }
+
+  const page = window.__currentPage;
+  if (page === 'scanner') {
+    import('./scanner.js').then(m => {
+      if (m.loadTodayLog) m.loadTodayLog();
+      if (teacher.role !== 'admin' && isCurrentTeacher) {
+        if (m.refreshFacultyGateStatus) m.refreshFacultyGateStatus();
+      }
+    });
+  } else if (page === 'voice') {
+    import('./voice.js').then(m => {
+      if (m.loadVoiceLog) m.loadVoiceLog();
+    });
+  }
 }
 
 function renderAuth() {
   app.innerHTML = `<div id="toast-container"></div>` + renderAuthPage();
-  initAuth((teacher) => renderApp(teacher));
+  initAuth((teacher) => {
+    renderApp(teacher);
+    connectSocket();
+  });
 }
 
 // Boot
 if (isLoggedIn()) {
   const teacher = getTeacher();
-  if (teacher) renderApp(teacher);
-  else renderAuth();
+  if (teacher) {
+    renderApp(teacher);
+    connectSocket();
+  } else {
+    renderAuth();
+  }
 } else {
   renderAuth();
 }

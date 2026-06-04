@@ -4,21 +4,27 @@ import { apiFetch, formatTime, getInitials, showToast, startCamera, stopCamera }
 let cameraStream  = null;
 let isScanning    = false;
 let ws            = null;
-let rafId         = null;          // requestAnimationFrame id (draws overlay)
-let latestResult  = null;          // latest WS detection result
-let pendingFrame  = false;         // back-pressure flag
-let lastCheckedIn = new Set();
+let rafId         = null;
+let latestResult  = null;
+let pendingFrame  = false;
 let fpsFrames     = 0;
+
+let lastApiCall   = new Map(); // userId -> timestamp
+const THROTTLE_MS = 10000;     // 10 seconds throttle per user per gate
+
+// Gate mode: 'auto' = automatic loop, 'in' = check-in, 'out' = check-out
+let gateMode = 'auto';
 
 const WS_URL = `ws://localhost:8000/ws/live-detect`;
 
-// ── Animated box interpolation for smooth box rendering ────────────────────
-// We store "current" boxes and smoothly animate toward "target" boxes
-let currentBoxes = [];   // [{x,y,w,h,conf,identified,label}]
-const LERP = 0.35;       // interpolation factor  (0=frozen, 1=snap)
+// ── Smooth box interpolation ───────────────────────────────────────────────
+let currentBoxes = [];
+const LERP = 0.35;
 
 // ── HTML ───────────────────────────────────────────────────────────────────
 export function renderScanner() {
+  const teacher = JSON.parse(localStorage.getItem('ta_teacher')) || {};
+  const isAdmin = teacher.role === 'admin';
   return `
 <div class="page" id="page-scanner">
   <div class="main-content">
@@ -26,7 +32,7 @@ export function renderScanner() {
     <div class="page-header flex items-center justify-between">
       <div>
         <h1>📸 Live Scanner</h1>
-        <p class="text-muted">Real-time face detection — auto-mark teacher attendance</p>
+        <p class="text-muted">Automatic face detection — select gate to mark attendance</p>
       </div>
       <div class="flex gap-2" style="align-items:center">
         <span id="scan-clock" class="badge badge-blue" style="font-size:14px;padding:8px 16px"></span>
@@ -35,9 +41,29 @@ export function renderScanner() {
       </div>
     </div>
 
+    <!-- ── Gate Toggle ─────────────────────────────────────────────── -->
+    <div class="gate-toggle-bar">
+      <div class="gate-toggle-label">Select Gate:</div>
+      <div class="gate-toggle-group">
+        <button class="gate-btn active" id="btn-gate-auto" data-gate="auto">
+          🔄 Auto Loop
+          <span class="gate-badge">IN ⇄ OUT</span>
+        </button>
+        <button class="gate-btn" id="btn-gate-in" data-gate="in">
+          🚪 IN Gate
+          <span class="gate-badge">Check-In</span>
+        </button>
+        <button class="gate-btn" id="btn-gate-out" data-gate="out">
+          🏁 OUT Gate
+          <span class="gate-badge">Check-Out</span>
+        </button>
+      </div>
+      <div id="gate-status-pill" class="gate-status-pill gate-auto">🔄 Auto Loop Active — Face direction auto-detected (IN ⇄ OUT)</div>
+    </div>
+
     <div class="scanner-layout">
 
-      <!-- ── Camera Feed ─────────────────────────────────────── -->
+      <!-- ── Camera Feed ──────────────────────────────────────────── -->
       <div class="card" style="padding:20px">
         <div class="flex items-center justify-between mb-4">
           <h3 class="font-bold">Camera Feed</h3>
@@ -47,15 +73,9 @@ export function renderScanner() {
           </div>
         </div>
 
-        <!--
-          The container is position:relative.
-          video  — live webcam, always 30fps, fills container
-          canvas — transparent overlay, position:absolute on top, draws boxes via JS
-        -->
         <div id="cam-wrap" style="position:relative;border-radius:14px;overflow:hidden;background:#0d0d0d;
              min-height:340px;display:flex;align-items:center;justify-content:center">
 
-          <!-- Start-camera placeholder -->
           <div id="cam-overlay" style="position:absolute;inset:0;display:flex;flex-direction:column;
                align-items:center;justify-content:center;gap:12px;z-index:10;background:#111">
             <div style="font-size:56px">📷</div>
@@ -63,19 +83,22 @@ export function renderScanner() {
             <button class="btn btn-primary" id="btn-start-cam">Start Camera</button>
           </div>
 
-          <!-- Live webcam video — always plays at 30fps -->
-          <video id="scanner-video"
-                 autoplay muted playsinline
+          <video id="scanner-video" autoplay muted playsinline
                  style="width:100%;height:100%;object-fit:cover;display:block;border-radius:14px">
           </video>
 
-          <!-- Transparent overlay canvas — JS draws boxes here each rAF tick -->
           <canvas id="overlay-canvas"
                   style="position:absolute;inset:0;width:100%;height:100%;
                          pointer-events:none;border-radius:14px">
           </canvas>
 
-          <!-- HUD bar at bottom of video -->
+          <!-- Gate mode indicator inside video -->
+          <div id="cam-gate-pill" style="display:none;position:absolute;top:12px;left:12px;
+               padding:5px 14px;border-radius:20px;font-size:12px;font-weight:700;
+               background:rgba(0,212,136,0.85);color:#000;backdrop-filter:blur(6px)">
+            📥 IN Gate
+          </div>
+
           <div id="cam-hud" style="display:none;position:absolute;bottom:0;left:0;right:0;
                padding:8px 14px;background:linear-gradient(transparent,rgba(0,0,0,0.75));
                border-radius:0 0 14px 14px;backdrop-filter:blur(4px);align-items:center;gap:8px">
@@ -86,11 +109,11 @@ export function renderScanner() {
         </div>
 
         <div class="flex gap-2 mt-4">
-          <button class="btn btn-accent w-full" id="btn-manual-checkin" disabled>📸 Manual Check-In</button>
+          <button class="btn btn-accent w-full" id="btn-manual-checkin" disabled>📸 Manual Check-In / Out</button>
         </div>
       </div>
 
-      <!-- ── Right Panel ─────────────────────────────────────── -->
+      <!-- ── Right Panel ──────────────────────────────────────────── -->
       <div style="display:flex;flex-direction:column;gap:16px">
 
         <!-- Detected teacher card -->
@@ -105,10 +128,10 @@ export function renderScanner() {
         <!-- Today's log -->
         <div class="card">
           <div class="flex items-center justify-between mb-4">
-            <h3 class="font-bold">Today's Check-ins</h3>
+            <h3 class="font-bold">Today's Activity</h3>
             <button class="btn btn-ghost btn-sm" id="btn-refresh-log">↻</button>
           </div>
-          <div id="today-log" style="display:flex;flex-direction:column;gap:10px;max-height:320px;overflow-y:auto">
+          <div id="today-log" style="display:flex;flex-direction:column;gap:10px;max-height:360px;overflow-y:auto">
             <p class="text-dim text-sm text-center" style="padding:20px">Loading…</p>
           </div>
         </div>
@@ -117,6 +140,51 @@ export function renderScanner() {
     </div>
   </div>
 </div>`;
+}
+
+// ── Gate UI & Status helpers ────────────────────────────────────────────────
+export function updateGateUI() {
+  const pill   = document.getElementById('gate-status-pill');
+  const camPill= document.getElementById('cam-gate-pill');
+  if (!pill) return;
+
+  // Sync the active class on the toggle buttons
+  document.querySelectorAll('.gate-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.gate === gateMode);
+  });
+
+  if (gateMode === 'in') {
+    pill.textContent  = '📥 IN Gate Active — Face detection will mark CHECK-IN';
+    pill.className    = 'gate-status-pill gate-in';
+    if (camPill) { camPill.textContent = '📥 IN Gate'; camPill.style.background = 'rgba(0,212,136,0.85)'; }
+  } else if (gateMode === 'out') {
+    pill.textContent  = '📤 OUT Gate Active — Face detection will mark CHECK-OUT';
+    pill.className    = 'gate-status-pill gate-out';
+    if (camPill) { camPill.textContent = '📤 OUT Gate'; camPill.style.background = 'rgba(245,158,11,0.85)'; }
+  } else {
+    pill.textContent  = '🔄 Auto Loop Active — Face direction auto-detected (IN ⇄ OUT)';
+    pill.className    = 'gate-status-pill gate-auto';
+    if (camPill) { camPill.textContent = '🔄 Auto Loop'; camPill.style.background = 'rgba(108,99,255,0.85)'; }
+  }
+}
+
+export async function refreshFacultyGateStatus() {
+  try {
+    const data = await apiFetch('/attendance/today');
+    const log = data.data?.log;
+    const lastEvent = log && log.logs && log.logs.length > 0
+      ? log.logs[log.logs.length - 1].event
+      : (log && log.checkInTime ? 'CHECK_IN' : null);
+
+    if (log && lastEvent === 'CHECK_IN') {
+      gateMode = 'out';
+    } else {
+      gateMode = 'in';
+    }
+    updateGateUI();
+  } catch (err) {
+    console.error('Failed to refresh faculty gate status:', err);
+  }
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
@@ -132,19 +200,41 @@ export async function initScanner() {
     if (el) el.textContent = new Date().toLocaleTimeString('en-IN');
   }, 1000);
 
-  // FPS counter (counts rAF ticks while scanning)
+  // FPS counter
   setInterval(() => {
     const el = document.getElementById('fps-badge');
     if (el) el.textContent = `${fpsFrames} fps`;
     fpsFrames = 0;
   }, 1000);
 
-  // ── Start Camera ────────────────────────────────────────────
+  // ── Gate toggle ─────────────────────────────────────────────────
+  document.querySelectorAll('.gate-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      gateMode = btn.dataset.gate;
+      document.querySelectorAll('.gate-btn').forEach(b => b.classList.toggle('active', b.dataset.gate === gateMode));
+      updateGateUI();
+      // Reset throttle on gate change
+      lastApiCall.clear();
+      latestResult = null;
+    });
+  });
+
+  const teacher = JSON.parse(localStorage.getItem('ta_teacher')) || {};
+  const isAdmin = teacher.role === 'admin';
+  if (!isAdmin) {
+    await refreshFacultyGateStatus();
+  } else {
+    gateMode = 'auto';
+    updateGateUI();
+  }
+
+  // ── Start Camera ──────────────────────────────────────────────────
   document.getElementById('btn-start-cam').addEventListener('click', async () => {
     try {
       cameraStream = await startCamera(video);
       document.getElementById('cam-overlay').style.display = 'none';
       document.getElementById('cam-hud').style.display     = 'flex';
+      document.getElementById('cam-gate-pill').style.display = 'block';
       document.getElementById('btn-manual-checkin').disabled = false;
       setHud('Camera ready — click Start Scanning', false);
     } catch {
@@ -152,7 +242,7 @@ export async function initScanner() {
     }
   });
 
-  // ── Stop ────────────────────────────────────────────────────
+  // ── Stop ──────────────────────────────────────────────────────────
   document.getElementById('btn-stop-cam').addEventListener('click', () => {
     teardown();
     stopCamera(cameraStream);
@@ -161,18 +251,18 @@ export async function initScanner() {
     currentBoxes = [];
     document.getElementById('cam-overlay').style.display = 'flex';
     document.getElementById('cam-hud').style.display     = 'none';
+    document.getElementById('cam-gate-pill').style.display = 'none';
     document.getElementById('btn-toggle-scan').textContent = '▶ Start Scanning';
     document.getElementById('btn-manual-checkin').disabled = true;
     setBadge(false);
   });
 
-  // ── Toggle Scan ─────────────────────────────────────────────
+  // ── Toggle Scan ────────────────────────────────────────────────────
   document.getElementById('btn-toggle-scan').addEventListener('click', () => {
     if (!cameraStream) { showToast('Start camera first', '', 'warning'); return; }
-
     if (isScanning) {
       teardown();
-      lastCheckedIn = new Set();   // reset so teachers can re-check-in after pause
+      lastApiCall.clear();
       document.getElementById('btn-toggle-scan').textContent = '▶ Start Scanning';
       setHud('Paused', false);
     } else {
@@ -182,26 +272,23 @@ export async function initScanner() {
     }
   });
 
-  // ── Manual Check-In ─────────────────────────────────────────
+  // ── Manual Check-In/Out ──────────────────────────────────────────
   document.getElementById('btn-manual-checkin').addEventListener('click', async () => {
     if (!latestResult?.identified) {
       showToast('No identified teacher', 'Face camera at a registered teacher', 'warning');
       return;
     }
-    await doCheckIn(latestResult, true);
+    await doGateAction(latestResult, true);
   });
 
   document.getElementById('btn-refresh-log').addEventListener('click', loadTodayLog);
   await loadTodayLog();
 
-  // ── Overlay draw loop (requestAnimationFrame) ────────────────
-  // Runs independently from WS — always at screen refresh rate
-  // so boxes feel smooth even when WS updates at ~10-15fps
+  // ── Overlay draw loop ──────────────────────────────────────────────
   function drawLoop() {
     rafId = requestAnimationFrame(drawLoop);
     if (!isScanning) return;
 
-    // Match canvas pixel size to element display size — fallback to offsetWidth if rAF fires before layout
     const rect = canvas.getBoundingClientRect();
     const cw = rect.width  || canvas.offsetWidth  || 640;
     const ch = rect.height || canvas.offsetHeight || 480;
@@ -217,9 +304,11 @@ export async function initScanner() {
     const { faceBoxes, frameW, frameH, identified, teacherName, confidence } = latestResult;
     if (!frameW || !frameH || !faceBoxes.length) return;
 
-    // Scale factors: WS frames are sent at video resolution, canvas may differ
     const scaleX = canvas.width  / frameW;
     const scaleY = canvas.height / frameH;
+
+    // Gate color: green for IN, amber for OUT
+    const gateColor = gateMode === 'in' ? '#00ff88' : '#f59e0b';
 
     faceBoxes.forEach((box, i) => {
       const x = box.x * scaleX;
@@ -228,7 +317,6 @@ export async function initScanner() {
       const h = box.h * scaleY;
       const isIdentified = identified && i === 0;
 
-      // ── Animated smooth interpolation toward target box ──────
       if (!currentBoxes[i]) currentBoxes[i] = { x, y, w, h };
       else {
         currentBoxes[i].x = lerp(currentBoxes[i].x, x, LERP);
@@ -238,22 +326,15 @@ export async function initScanner() {
       }
       const bx = currentBoxes[i];
 
-      // ── Glow shadow ──────────────────────────────────────────
-      const color = isIdentified ? '#00ff88' : '#00d4ff';
+      const color = isIdentified ? gateColor : '#00d4ff';
       ctx.shadowColor   = color;
       ctx.shadowBlur    = 18;
-
-      // ── Bounding box ─────────────────────────────────────────
-      ctx.strokeStyle = color;
-      ctx.lineWidth   = 2.5;
+      ctx.strokeStyle   = color;
+      ctx.lineWidth     = 2.5;
       ctx.strokeRect(bx.x, bx.y, bx.w, bx.h);
-
-      // Corner accents
       drawCorners(ctx, bx.x, bx.y, bx.w, bx.h, color, 18, 3);
-
       ctx.shadowBlur = 0;
 
-      // ── Label pill ───────────────────────────────────────────
       const label     = isIdentified
         ? `${teacherName}  ${Math.round((confidence || 0) * 100)}%`
         : `Unknown  ${Math.round((box.conf || 0) * 100)}%`;
@@ -264,33 +345,28 @@ export async function initScanner() {
       const pillX     = bx.x;
       const pillY     = bx.y - pillH - 4;
 
-      // Pill background
       ctx.fillStyle = color;
       roundRect(ctx, pillX, pillY, textW + 16, pillH, 6);
       ctx.fill();
 
-      // Label text
       ctx.shadowBlur  = 0;
-      ctx.fillStyle   = isIdentified ? '#000' : '#000';
+      ctx.fillStyle   = '#000';
       ctx.fillText(label, pillX + 8, pillY + pillH - 6);
     });
 
-    // Trim stale boxes if fewer faces returned
     currentBoxes = currentBoxes.slice(0, faceBoxes.length);
   }
 
-  // ── Start scan: open WS + rAF loop ──────────────────────────
+  // ── Start scan ─────────────────────────────────────────────────────
   function startScan(video, canvas, ctx) {
     isScanning   = true;
     pendingFrame = false;
     currentBoxes = [];
     latestResult = null;
 
-    // Start overlay draw loop
     if (rafId) cancelAnimationFrame(rafId);
     drawLoop();
 
-    // Open WebSocket
     if (ws) { try { ws.close(); } catch (_) {} }
     ws = new WebSocket(WS_URL);
     ws.binaryType = 'arraybuffer';
@@ -309,15 +385,15 @@ export async function initScanner() {
 
       latestResult = data;
 
-      // Update HUD counter
       const el = document.getElementById('hud-frames');
       if (el) el.textContent = `${++framesSent} frames sent`;
 
-      // Update side panel
       if (data.identified && data.teacherName) {
         renderDetected(data);
-        if (!lastCheckedIn.has(data.userId)) {
-          await doCheckIn(data, false);
+        const lastCall = lastApiCall.get(data.userId);
+        if (!lastCall || (Date.now() - lastCall) > THROTTLE_MS) {
+          lastApiCall.set(data.userId, Date.now());
+          await doGateAction(data, false);
         }
       }
     };
@@ -325,7 +401,6 @@ export async function initScanner() {
     ws.onerror = () => {
       setBadge(false);
       setHud('WS error — is face service running on :8000?', false);
-      showToast('WebSocket Error', 'Face service unreachable at port 8000', 'error');
     };
 
     ws.onclose = () => {
@@ -334,9 +409,9 @@ export async function initScanner() {
     };
   }
 
-  // ── Send frames over WS at ~15fps with back-pressure ────────
+  // ── Frame sender ────────────────────────────────────────────────────
   function startFrameSender(video) {
-    const FPS = 15;
+    const FPS      = 15;
     const INTERVAL = 1000 / FPS;
     const off    = document.createElement('canvas');
     const offCtx = off.getContext('2d');
@@ -369,36 +444,53 @@ export async function initScanner() {
   }
 }
 
-// ── Check-in via REST ──────────────────────────────────────────────────────
-async function doCheckIn(identity, manual) {
+// ── Gate action (check-in or check-out) ────────────────────────────────────
+async function doGateAction(identity, manual) {
   try {
     const res = await apiFetch('/attendance/camera-scan', {
       method: 'POST',
-      body: JSON.stringify({ userId: identity.userId }),
+      body: JSON.stringify({ userId: identity.userId, gate: gateMode }),
     });
-    if (res.data?.autoCheckedIn || manual) {
-      lastCheckedIn.add(identity.userId);
-      showToast(`✅ ${identity.teacherName}`, 'Check-in recorded!', 'success');
+
+    const isCheckIn = res.data?.autoCheckedIn;
+    const isCheckOut = res.data?.autoCheckedOut;
+
+    if (isCheckIn) {
+      showToast(`📥 ${identity.teacherName}`, 'Check-in recorded! — ' + new Date().toLocaleTimeString('en-IN'), 'success');
       await loadTodayLog();
+    } else if (isCheckOut) {
+      showToast(`📤 ${identity.teacherName}`, 'Check-out recorded! — ' + new Date().toLocaleTimeString('en-IN'), 'info');
+      await loadTodayLog();
+    } else if (manual) {
+      if (res.data?.alreadyCheckedIn) {
+        showToast(`📥 ${identity.teacherName}`, 'Already checked in for today', 'warning');
+      } else if (res.data?.alreadyCheckedOut) {
+        showToast(`📤 ${identity.teacherName}`, 'Already checked out for today', 'warning');
+      }
     }
-  } catch { /* already checked-in or transient error */ }
+  } catch (err) {
+    console.error('[Scanner] Gate action failed:', err);
+  }
 }
 
-// ── Render detected-teacher card ───────────────────────────────────────────
+// ── Render detected teacher card ───────────────────────────────────────────
 function renderDetected(data) {
   const pct  = Math.round((data.confidence || 0) * 100);
   const name = data.teacherName || 'Unknown';
+  const gateLabel = gateMode === 'in' ? '📥 IN Gate' : '📤 OUT Gate';
+  const gateColor = gateMode === 'in' ? '#00ff88' : '#f59e0b';
+
   document.getElementById('detected-panel').innerHTML = `
     <div class="detected-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.08),rgba(0,180,216,0.08));
-         border:1px solid rgba(0,255,136,0.25)">
+         border:1px solid ${gateColor}44">
       <div class="flex items-center gap-3 mb-3">
-        <div class="teacher-avatar" style="background:linear-gradient(135deg,#00ff88,#00b4d8);
+        <div class="teacher-avatar" style="background:linear-gradient(135deg,${gateColor},#00b4d8);
              color:#000;font-weight:800;font-size:18px">
           ${name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
         </div>
         <div>
           <div class="teacher-name">${name}</div>
-          <div style="font-size:11px;color:#00ff88;font-weight:600;letter-spacing:.04em">● LIVE DETECTION</div>
+          <div style="font-size:11px;color:${gateColor};font-weight:600;letter-spacing:.04em">● LIVE DETECTION</div>
         </div>
       </div>
       <div class="flex items-center justify-between text-sm mb-1">
@@ -409,36 +501,59 @@ function renderDetected(data) {
            background:${pct > 75 ? 'var(--success)' : 'var(--warning)'}"></div></div>
       <div class="mt-3 flex gap-2">
         <span class="badge badge-green" style="animation:pulse 1.4s infinite">🟢 Detected</span>
+        <span class="badge" style="background:${gateColor}22;color:${gateColor};border:1px solid ${gateColor}44">${gateLabel}</span>
       </div>
     </div>`;
 }
 
-// ── Today's log ────────────────────────────────────────────────────────────
-async function loadTodayLog() {
+// ── Today's log — shows both check-in and check-out times ──────────────────
+export async function loadTodayLog() {
   try {
-    const data = await apiFetch('/attendance/all');
-    const logs = data.data?.logs || [];
+    const teacher = JSON.parse(localStorage.getItem('ta_teacher')) || {};
+    const isAdmin = teacher.role === 'admin';
+
+    let logs = [];
+    if (isAdmin) {
+      const data = await apiFetch('/attendance/all');
+      logs = data.data?.logs || [];
+    } else {
+      const data = await apiFetch('/attendance/today');
+      const log = data.data?.log;
+      logs = log ? [log] : [];
+    }
+
     const el   = document.getElementById('today-log');
+    if (!el) return;
     if (!logs.length) {
-      el.innerHTML = '<p class="text-dim text-sm text-center" style="padding:20px">No check-ins yet today</p>';
+      el.innerHTML = '<p class="text-dim text-sm text-center" style="padding:20px">No activity today</p>';
       return;
     }
-    el.innerHTML = logs.map(l => `
-      <div class="flex items-center gap-3"
-           style="padding:10px;background:var(--surface);border-radius:10px;border:1px solid var(--border)">
-        <div class="teacher-avatar" style="width:36px;height:36px;font-size:13px">
-          ${getInitials(l.teacherId?.fullName)}
+    el.innerHTML = logs.map(l => {
+      const inTime  = l.checkInTime  ? formatTime(l.checkInTime)  : null;
+      const outTime = l.checkOutTime ? formatTime(l.checkOutTime) : null;
+      return `
+      <div style="padding:10px 12px;background:var(--surface);border-radius:10px;
+                  border:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+        <div class="flex items-center gap-3">
+          <div class="teacher-avatar" style="width:36px;height:36px;font-size:13px;flex-shrink:0">
+            ${getInitials(l.teacherId?.fullName)}
+          </div>
+          <div style="flex:1;min-width:0">
+            <div class="font-semibold text-sm">${l.teacherId?.fullName || 'Unknown'}</div>
+            <div class="text-dim" style="font-size:11px">${l.teacherId?.department || ''}</div>
+          </div>
         </div>
-        <div style="flex:1">
-          <div class="font-semibold text-sm">${l.teacherId?.fullName || 'Unknown'}</div>
-          <div class="text-dim" style="font-size:11px">${formatTime(l.checkInTime)}</div>
+        <div class="flex gap-2" style="margin-left:48px;flex-wrap:wrap">
+          ${inTime  ? `<span class="time-chip in">📥 ${inTime}</span>`  : ''}
+          ${outTime ? `<span class="time-chip out">📤 ${outTime}</span>` : ''}
+          ${!inTime && !outTime ? '<span class="text-dim text-xs">No events yet</span>' : ''}
         </div>
-        <span class="badge ${l.status === 'LATE' ? 'badge-yellow' : 'badge-green'}">${l.status}</span>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } catch { /* silent */ }
 }
 
-// ── HUD / badge helpers ────────────────────────────────────────────────────
+// ── HUD helpers ────────────────────────────────────────────────────────────
 function setHud(text, active) {
   const dot  = document.getElementById('hud-dot');
   const span = document.getElementById('hud-text');
@@ -454,7 +569,7 @@ function setBadge(online) {
   el.style.color       = online ? '#00ff88' : '#aaa';
 }
 
-// ── Canvas drawing helpers ─────────────────────────────────────────────────
+// ── Canvas helpers ─────────────────────────────────────────────────────────
 function lerp(a, b, t) { return a + (b - a) * t; }
 
 function drawCorners(ctx, x, y, w, h, color, size, lineW) {

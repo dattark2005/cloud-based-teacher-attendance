@@ -26,7 +26,11 @@ jest.mock('cloudinary', () => ({
 // Mock auth middleware to inject teacher without DB lookup
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, res, next) => {
-    req.teacher = { _id: 'teacher123' };
+    req.teacher = { _id: 'teacher123', department: 'CS' };
+    next();
+  },
+  authorizeAdmin: (req, res, next) => {
+    req.teacher = { _id: 'teacher123', role: 'admin', department: 'CS' };
     next();
   },
 }));
@@ -332,7 +336,8 @@ describe('GET /api/attendance/all', () => {
       .get('/api/attendance/all')
       .set('Authorization', AUTH);
     expect(res.status).toBe(200);
-    const today = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     expect(res.body.data.date).toBe(today);
   });
 });

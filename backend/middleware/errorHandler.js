@@ -1,6 +1,19 @@
+const fs = require('fs');
+const path = require('path');
+
 const errorHandler = (err, req, res, next) => {
   let statusCode = err.statusCode || 500;
   let message = err.message || 'Internal Server Error';
+
+  // Log error to a local file for debugging
+  try {
+    const logDir = __dirname;
+    const logFile = path.join(logDir, '../error.log');
+    const logMessage = `[${new Date().toISOString()}] ${req.method} ${req.originalUrl}\nError: ${err.message}\nStack: ${err.stack}\n\n`;
+    fs.appendFileSync(logFile, logMessage);
+  } catch (logErr) {
+    console.error('Failed to write to error.log:', logErr);
+  }
 
   // Mongoose duplicate key
   if (err.code === 11000) {
@@ -39,3 +52,4 @@ const notFound = (req, res, next) => {
 };
 
 module.exports = { errorHandler, notFound };
+

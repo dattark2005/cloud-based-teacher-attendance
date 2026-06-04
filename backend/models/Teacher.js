@@ -62,6 +62,11 @@ const teacherSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    role: {
+      type: String,
+      enum: ['faculty', 'admin'],
+      default: 'faculty',
+    },
     isActive: {
       type: Boolean,
       default: true,
