@@ -573,24 +573,12 @@ async def verify_voice(
         log.info(f"Secure Resemblyzer verify  user={user_id}  sim={similarity:.4f}  "
                  f"threshold={verify_threshold}  verified={verified}")
     else:
-        # Legacy cosine-similarity fallback
+        # Reject legacy voice profiles to ensure high security using Resemblyzer
         log.warning(f"⚠️ Legacy voice profile detected for user {user_id}. Please re-register voice for enhanced security.")
-        try:
-            embed_live = extract_embedding(wav)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except Exception as e:
-            raise HTTPException(500, f"Embedding failed: {e}")
-
-        # Exclude cepstral energy dimensions for high speaker discriminative power
-        embed_live_clean = clean_embedding(embed_live)
-        embed_stored_clean = clean_embedding(embed_stored)
-        
-        similarity   = cosine_similarity(embed_live_clean, embed_stored_clean)
-        verified     = bool(similarity >= threshold)
-        verify_threshold = threshold
-        log.info(f"Legacy voice verify  user={user_id}  sim={similarity:.4f}  "
-                 f"threshold={verify_threshold}  verified={verified}")
+        raise HTTPException(
+            status_code=400,
+            detail="Legacy voice profile detected. Please re-register your voice for secure Resemblyzer verification."
+        )
 
     return {
         "success":    True,

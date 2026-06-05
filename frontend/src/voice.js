@@ -495,6 +495,15 @@ async function doVerify(wavBlob) {
         document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === 'register'));
         return;
       }
+      if (vData.detail && vData.detail.includes('Legacy')) {
+        setRingState('idle');
+        setStatus('⚠️ Legacy voice profile detected — please re-register!', 'out');
+        showToast('Re-register Required', vData.detail, 'warning');
+        // Auto-switch to register mode
+        setMode('register');
+        document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === 'register'));
+        return;
+      }
       throw new Error(vData.detail || 'Voice verification failed');
     }
 
