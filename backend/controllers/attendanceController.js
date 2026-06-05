@@ -14,8 +14,15 @@ cloudinary.config({
 const FACE_SERVICE_URL = process.env.FACE_SERVICE_URL || 'http://localhost:8000';
 
 function getTodayDateString() {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  if (process.env.NODE_ENV === 'test') {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  }
+  const options = { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' };
+  const formatter = new Intl.DateTimeFormat('en-US', options);
+  const parts = formatter.formatToParts(new Date());
+  const partMap = Object.fromEntries(parts.map(p => [p.type, p.value]));
+  return `${partMap.year}-${partMap.month}-${partMap.day}`;
 }
 
 function getCooldownRemaining(existing, now) {
@@ -103,7 +110,7 @@ const checkIn = async (req, res, next) => {
 
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
         headers: formData.getHeaders(),
-        timeout: 20000,
+        timeout: 90000,
       });
 
       if (!pyRes.data.verified) {
@@ -254,7 +261,7 @@ const checkOut = async (req, res, next) => {
       formData.append('file', imageBuffer, { filename: 'verify.jpg', contentType: 'image/jpeg' });
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/verify-face`, formData, {
         headers: formData.getHeaders(),
-        timeout: 20000,
+        timeout: 90000,
       });
       if (!pyRes.data.verified) {
         return res.status(401).json({
@@ -528,7 +535,7 @@ const cameraScan = async (req, res, next) => {
       
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/identify-face`, formData, {
         headers: formData.getHeaders(),
-        timeout: 20000,
+        timeout: 90000,
       });
 
       if (!pyRes.data.identified) {

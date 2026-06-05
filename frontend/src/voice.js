@@ -524,15 +524,15 @@ async function stopRecording() {
   }
 }
 
-// ── Voice fetch with 30s timeout (prevents stuck-on-Processing) ────────────
+// ── Voice fetch with 90s timeout (accommodates Render free tier cold starts and CPU constraints) ────────────
 async function voiceFetch(url, options = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), 90000);
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
     return res;
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error('Request timed out (30s) — voice service may be busy');
+    if (err.name === 'AbortError') throw new Error('Request timed out (90s) — voice service may be busy or spinning up');
     throw err;
   } finally {
     clearTimeout(timer);
