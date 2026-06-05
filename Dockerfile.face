@@ -17,7 +17,5 @@ COPY face_service.py .
 
 EXPOSE 8000
 
-ENV PORT=8000
-
-# Start FastAPI server using uvicorn
-CMD ["uvicorn", "face_service:app", "--host", "0.0.0.0", "--port", "8000"]
+# Start FastAPI server using uvicorn, dynamically binding to the port specified by the platform
+CMD ["sh", "-c", "uvicorn face_service:app --host 0.0.0.0 --port ${PORT:-8000}"]
