@@ -1,9 +1,12 @@
 FROM python:3.10-slim
 
-# Install system dependencies for soundfile (libsndfile1) and PyAV (ffmpeg)
+# Install system dependencies (including gcc, g++, and python3-dev to compile C extensions like webrtcvad)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     ffmpeg \
+    gcc \
+    g++ \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
