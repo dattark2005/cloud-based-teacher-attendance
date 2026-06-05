@@ -12,9 +12,8 @@ WORKDIR /app
 COPY requirements.face.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the service code and face models
+# Copy the service code (ONNX models will be downloaded dynamically on startup)
 COPY face_service.py .
-COPY models/ ./models/
 
 EXPOSE 8000
 
