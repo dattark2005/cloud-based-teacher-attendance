@@ -330,12 +330,19 @@ def extract_frame_features(wav: np.ndarray, sr: int = 16000) -> np.ndarray:
     return feat_norm.T.astype(np.float32) # (T, 57)
 
 
-_encoder = None
+# Initialize Resemblyzer VoiceEncoder on startup to prevent request-time cold start timeouts
+try:
+    log.info("Loading Resemblyzer VoiceEncoder on CPU at startup...")
+    _encoder = VoiceEncoder(device="cpu")
+    log.info("✅ Resemblyzer VoiceEncoder loaded successfully")
+except Exception as e:
+    log.error(f"❌ Failed to load Resemblyzer VoiceEncoder: {e}")
+    _encoder = None
 
 def get_voice_encoder():
     global _encoder
     if _encoder is None:
-        log.info("Loading Resemblyzer VoiceEncoder on CPU...")
+        log.info("Loading Resemblyzer VoiceEncoder on CPU (lazy fallback)...")
         _encoder = VoiceEncoder(device="cpu")
     return _encoder
 
