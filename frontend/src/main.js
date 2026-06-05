@@ -115,7 +115,10 @@ function connectSocket() {
   if (socket) {
     try { socket.disconnect(); } catch (_) {}
   }
-  socket = io(window.location.origin);
+  const socketUrl = import.meta.env.VITE_BACKEND_URL 
+    ? import.meta.env.VITE_BACKEND_URL.replace(/\/api$/, '') 
+    : window.location.origin;
+  socket = io(socketUrl);
 
   socket.on('connect', () => console.log('🔌 Connected to Socket.io'));
   socket.on('attendance:checkin', (data) => handleSocketEvent(data));
