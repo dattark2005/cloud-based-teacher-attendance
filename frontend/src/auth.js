@@ -44,7 +44,7 @@ export function renderAuthPage() {
     <!-- REGISTER FORM -->
     <div id="register-form" class="hidden">
       <form class="auth-form" id="register-form-el">
-        <div class="grid-2" style="gap:14px">
+        <div style="display:flex; flex-direction:column; gap:14px">
           <div class="form-group">
             <label class="form-label">Full Name</label>
             <input type="text" id="reg-name" class="form-input" placeholder="Dr. John Doe" required />
@@ -61,14 +61,14 @@ export function renderAuthPage() {
             <label class="form-label">Department</label>
             <input type="text" id="reg-dept" class="form-input" placeholder="Computer Science" required />
           </div>
-          <div class="form-group" style="grid-column:1/-1">
+          <div class="form-group">
             <label class="form-label">Role</label>
             <select id="reg-role" class="form-input form-select">
               <option value="faculty">Faculty</option>
               <option value="admin">Admin</option>
             </select>
           </div>
-          <div class="form-group" style="grid-column:1/-1">
+          <div class="form-group">
             <label class="form-label">Password</label>
             <input type="password" id="reg-password" class="form-input" placeholder="Min 6 characters" required minlength="6" />
           </div>
@@ -152,7 +152,7 @@ export function initAuth(onSuccess) {
           fullName: document.getElementById('reg-name').value,
           employeeId: document.getElementById('reg-empid').value.toUpperCase(),
           email: document.getElementById('reg-email').value,
-          department: document.getElementById('reg-dept').value,
+          department: document.getElementById('reg-dept').value.toLowerCase().trim(),
           role: document.getElementById('reg-role').value,
           password: document.getElementById('reg-password').value,
         }),

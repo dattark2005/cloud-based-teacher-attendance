@@ -36,8 +36,6 @@ export function renderScanner() {
       </div>
       <div class="flex gap-2" style="align-items:center">
         <span id="scan-clock" class="badge badge-blue" style="font-size:14px;padding:8px 16px"></span>
-        <span id="ws-badge" class="badge" style="font-size:12px;padding:5px 12px;background:#333;color:#aaa;border-radius:20px">● WS offline</span>
-        <span id="fps-badge" class="badge badge-blue" style="font-size:12px;padding:5px 12px">0 fps</span>
       </div>
     </div>
 
@@ -449,11 +447,17 @@ async function doGateAction(identity, manual) {
   try {
     const res = await apiFetch('/attendance/camera-scan', {
       method: 'POST',
-      body: JSON.stringify({ userId: identity.userId, gate: gateMode }),
+      body: JSON.stringify({ userId: identity.userId, gate: gateMode, confidence: identity.confidence }),
     });
 
     const isCheckIn = res.data?.autoCheckedIn;
     const isCheckOut = res.data?.autoCheckedOut;
+    const isCooldown = res.data?.cooldown;
+
+    if (isCooldown) {
+      showToast('Please wait', res.data.message || 'Please wait before scanning again.', 'warning');
+      return;
+    }
 
     if (isCheckIn) {
       showToast(`📥 ${identity.teacherName}`, 'Check-in recorded! — ' + new Date().toLocaleTimeString('en-IN'), 'success');
@@ -470,6 +474,7 @@ async function doGateAction(identity, manual) {
     }
   } catch (err) {
     console.error('[Scanner] Gate action failed:', err);
+    showToast('Scanner Error', err.message || 'Gate action failed', 'error');
   }
 }
 
@@ -540,7 +545,7 @@ export async function loadTodayLog() {
           </div>
           <div style="flex:1;min-width:0">
             <div class="font-semibold text-sm">${l.teacherId?.fullName || 'Unknown'}</div>
-            <div class="text-dim" style="font-size:11px">${l.teacherId?.department || ''}</div>
+            <div class="text-dim" style="font-size:11px">${(l.teacherId?.department || '').toUpperCase()}</div>
           </div>
         </div>
         <div class="flex gap-2" style="margin-left:48px;flex-wrap:wrap">

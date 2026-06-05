@@ -38,7 +38,12 @@ const register = async (req, res, next) => {
     const teacherRole = role === 'admin' ? 'admin' : 'faculty';
 
     const teacher = await Teacher.create({
-      fullName, employeeId, email, password, department, role: teacherRole,
+      fullName,
+      employeeId,
+      email,
+      password,
+      department: department.toLowerCase().trim(),
+      role: teacherRole,
       phone: phone || null,
       designation: designation || 'Assistant Professor',
     });

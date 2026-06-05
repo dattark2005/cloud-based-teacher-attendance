@@ -32,6 +32,7 @@ const teacherSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Department is required'],
       trim: true,
+      lowercase: true,
     },
     designation: {
       type: String,
@@ -61,6 +62,11 @@ const teacherSchema = new mongoose.Schema(
     faceRegisteredAt: {
       type: Date,
       default: null,
+    },
+    // Voice recognition
+    voiceEncoding: {
+      type: Buffer,
+      select: false,
     },
     role: {
       type: String,

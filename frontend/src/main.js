@@ -72,7 +72,22 @@ function renderApp(teacher) {
 
   // Sidebar navigation
   document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-    item.addEventListener('click', () => navigate(item.dataset.page));
+    item.addEventListener('click', () => {
+      const page = item.dataset.page;
+      navigate(page);
+      if (page === 'profile') {
+        import('./profile.js').then(m => {
+          m.loadProfileHistory();
+          m.loadVoiceLogs();
+        });
+      } else if (page === 'dashboard') {
+        refreshDashboard();
+      } else if (page === 'scanner') {
+        import('./scanner.js').then(m => m.loadTodayLog());
+      } else if (page === 'voice') {
+        import('./voice.js').then(m => m.loadVoiceLog());
+      }
+    });
   });
 
   // Logout
@@ -129,6 +144,17 @@ function handleSocketEvent(data) {
   } else if (page === 'voice') {
     import('./voice.js').then(m => {
       if (m.loadVoiceLog) m.loadVoiceLog();
+    });
+  } else if (page === 'profile') {
+    import('./profile.js').then(m => {
+      if (m.loadProfileHistory) m.loadProfileHistory();
+    });
+  }
+
+  // Real-time refresh for admin details modal
+  if (teacher.role === 'admin' && window.__activeModalTeacherId === data.teacherId) {
+    import('./dashboard.js').then(m => {
+      if (m.refreshAdminModal) m.refreshAdminModal();
     });
   }
 }

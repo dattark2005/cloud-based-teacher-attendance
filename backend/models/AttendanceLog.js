@@ -21,7 +21,7 @@ const attendanceLogSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['PRESENT', 'ABSENT', 'LATE'],
+      enum: ['PRESENT', 'ABSENT'],
       default: 'PRESENT',
     },
     // Primary method (backwards compat)

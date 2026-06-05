@@ -1,5 +1,6 @@
 const AttendanceLog = require('../models/AttendanceLog');
 const Teacher = require('../models/Teacher');
+const BiometricLog = require('../models/BiometricLog');
 const axios = require('axios');
 const FormData = require('form-data');
 const cloudinary = require('cloudinary').v2;
@@ -17,6 +18,24 @@ function getTodayDateString() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
+function getCooldownRemaining(existing, now) {
+  if (!existing) return 0;
+  let lastTimestamp = null;
+  if (existing.logs && existing.logs.length > 0) {
+    lastTimestamp = existing.logs[existing.logs.length - 1].timestamp;
+  } else if (existing.checkOutTime) {
+    lastTimestamp = existing.checkOutTime;
+  } else if (existing.checkInTime) {
+    lastTimestamp = existing.checkInTime;
+  }
+
+  if (!lastTimestamp) return 0;
+
+  const diffMs = now - new Date(lastTimestamp);
+  const remainingSecs = 180 - (diffMs / 1000);
+  return remainingSecs > 0 ? Math.ceil(remainingSecs) : 0;
+}
+
 // ─── CHECK-IN ─────────────────────────────────────────────────────────────────
 
 // POST /api/attendance/check-in
@@ -31,15 +50,35 @@ const checkIn = async (req, res, next) => {
 
     const today = getTodayDateString();
 
-    // Check if already checked in
-    const existing = await AttendanceLog.findOne({ teacherId, date: today });
-    if (existing && existing.checkInTime) {
+    // Check absolute last event across all days
+    let query = AttendanceLog.findOne({ teacherId });
+    if (typeof query.sort === 'function') {
+      query = query.sort({ date: -1 });
+    }
+    const lastLog = await query;
+    const lastEvent = lastLog && lastLog.logs && lastLog.logs.length > 0
+      ? lastLog.logs[lastLog.logs.length - 1].event
+      : (lastLog && lastLog.checkInTime ? 'CHECK_IN' : null);
+
+    if (lastEvent === 'CHECK_IN') {
       return res.status(400).json({
         success: false,
-        message: 'Already checked in for today',
-        data: { log: existing },
+        message: 'Already checked in. Please check out first.',
+        data: { log: lastLog },
       });
     }
+
+    let now = new Date();
+    const cooldownRemaining = getCooldownRemaining(lastLog, now);
+    if (cooldownRemaining > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Please wait ${cooldownRemaining} more seconds before checking in.`,
+        data: { log: lastLog }
+      });
+    }
+
+    const existing = (lastLog && lastLog.date === today) ? lastLog : null;
 
     // Verify face with Python service
     const teacher = await Teacher.findById(teacherId).select('+faceEncoding +faceImageData');
@@ -93,11 +132,7 @@ const checkIn = async (req, res, next) => {
       } catch (_) {}
     }
 
-    // Determine status — LATE if after 9:30 AM
-    const now = new Date();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
-    const isLate = hours > 9 || (hours === 9 && minutes > 30);
+    now = new Date();
 
     const logEntry = {
       event: 'CHECK_IN',
@@ -110,7 +145,8 @@ const checkIn = async (req, res, next) => {
     let log;
     if (existing) {
       existing.checkInTime = now;
-      existing.status = isLate ? 'LATE' : 'PRESENT';
+      existing.checkOutTime = null; // Clear check-out time on re-check-in
+      existing.status = 'PRESENT';
       existing.confidenceScore = confidenceScore;
       // Merge methods
       const methods = new Set([...(existing.verificationMethods || []), verificationMethod]);
@@ -125,7 +161,7 @@ const checkIn = async (req, res, next) => {
         teacherId,
         date: today,
         checkInTime: now,
-        status: isLate ? 'LATE' : 'PRESENT',
+        status: 'PRESENT',
         verificationMethod,
         verificationMethods: [verificationMethod],
         confidenceScore,
@@ -148,7 +184,7 @@ const checkIn = async (req, res, next) => {
 
     res.json({
       success: true,
-      message: `✅ Check-in successful! ${isLate ? '(Late)' : 'On time'}`,
+      message: '✅ Check-in successful!',
       data: {
         log,
         confidence: confidenceScore,
@@ -173,14 +209,39 @@ const checkOut = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Face image is required' });
     }
 
-    const today = getTodayDateString();
-    const existing = await AttendanceLog.findOne({ teacherId, date: today });
-
-    if (!existing || !existing.checkInTime) {
-      return res.status(400).json({ success: false, message: 'No check-in found for today. Please check in first.' });
+    // Check absolute last event across all days
+    let query = AttendanceLog.findOne({ teacherId });
+    if (typeof query.sort === 'function') {
+      query = query.sort({ date: -1 });
     }
-    if (existing.checkOutTime) {
-      return res.status(400).json({ success: false, message: 'Already checked out for today', data: { log: existing } });
+    const lastLog = await query;
+
+    const lastEvent = lastLog && lastLog.logs && lastLog.logs.length > 0
+      ? lastLog.logs[lastLog.logs.length - 1].event
+      : (lastLog && lastLog.checkInTime ? 'CHECK_IN' : null);
+
+    if (!lastLog) {
+      return res.status(400).json({ success: false, message: 'No check-in found. Please check in first.' });
+    }
+
+    if (lastEvent === 'CHECK_OUT') {
+      return res.status(400).json({ success: false, message: 'Already checked out. Please check in first.' });
+    }
+
+    if (lastEvent !== 'CHECK_IN') {
+      return res.status(400).json({ success: false, message: 'No check-in found. Please check in first.' });
+    }
+
+    const existing = lastLog;
+
+    let now = new Date();
+    const cooldownRemaining = getCooldownRemaining(existing, now);
+    if (cooldownRemaining > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Please wait ${cooldownRemaining} more seconds before checking out.`,
+        data: { log: existing }
+      });
     }
 
     const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
@@ -208,9 +269,9 @@ const checkOut = async (req, res, next) => {
       console.warn('⚠️  Face service unavailable — fallback check-out');
     }
 
-    const now = new Date();
+    now = new Date();
     existing.checkOutTime = now;
-    existing.logs.push({ event: 'CHECK_OUT', timestamp: now, confidence: confidenceScore, snapshotUrl });
+    existing.logs.push({ event: 'CHECK_OUT', method: 'FACE', timestamp: now, confidence: confidenceScore, snapshotUrl });
     await existing.save();
 
     const io = req.app.get('io');
@@ -250,25 +311,48 @@ const getHistory = async (req, res, next) => {
     const page  = parseInt(req.query.page)  || 1;
     const skip  = (page - 1) * limit;
 
-    const [logs, total, allLogs] = await Promise.all([
-      AttendanceLog.find({ teacherId })
+    const queryCond = { teacherId };
+    if (req.query.startDate || req.query.endDate) {
+      queryCond.date = {};
+      if (req.query.startDate) queryCond.date.$gte = req.query.startDate;
+      if (req.query.endDate) queryCond.date.$lte = req.query.endDate;
+    }
+
+    const [logs, total, allLogs, fullLogs] = await Promise.all([
+      AttendanceLog.find(queryCond)
         .sort({ date: -1 })
         .skip(skip)
         .limit(limit),
-      AttendanceLog.countDocuments({ teacherId }),
+      AttendanceLog.countDocuments(queryCond),
       // Fetch all to compute accurate present/late totals
-      AttendanceLog.find({ teacherId }, 'status'),
+      AttendanceLog.find(queryCond, 'status'),
+      // Fetch all logs in range to calculate the exact check-in and check-out counts
+      AttendanceLog.find(queryCond, 'logs checkInTime checkOutTime'),
     ]);
 
     const present = allLogs.filter(l => l.status === 'PRESENT').length;
-    const late    = allLogs.filter(l => l.status === 'LATE').length;
-    const absent  = total - present - late;
+    const absent  = total - present;
+
+    let checkInCount = 0;
+    let checkOutCount = 0;
+    (fullLogs || []).forEach(l => {
+      if (!l) return;
+      if (l.logs && l.logs.length > 0) {
+        l.logs.forEach(e => {
+          if (e.event === 'CHECK_IN') checkInCount++;
+          if (e.event === 'CHECK_OUT') checkOutCount++;
+        });
+      } else {
+        if (l.checkInTime) checkInCount++;
+        if (l.checkOutTime) checkOutCount++;
+      }
+    });
 
     res.json({
       success: true,
       data: {
         logs,
-        stats: { total, present, late, absent: Math.max(0, absent) },
+        stats: { total, present, absent: Math.max(0, absent), checkInCount, checkOutCount },
         pagination: { page, limit, totalDocs: total, totalPages: Math.ceil(total / limit) },
       },
     });
@@ -283,14 +367,17 @@ const getHistory = async (req, res, next) => {
 const getAllAttendance = async (req, res, next) => {
   try {
     const { date = getTodayDateString() } = req.query;
-    const adminDept = req.teacher.department; // The admin's department
+    const adminDept = (req.teacher.department || '').toLowerCase().trim(); // The admin's department
 
     // Fetch all logs and filter in memory by department
     const allLogs = await AttendanceLog.find({ date }).populate('teacherId', 'fullName employeeId department');
-    const logs = allLogs.filter(l => l.teacherId && l.teacherId.department === adminDept);
+    const logs = allLogs.filter(l => l.teacherId && (l.teacherId.department || '').toLowerCase().trim() === adminDept);
 
     // Fetch teachers in the same department
-    const teachers = await Teacher.find({ isActive: true, department: adminDept }, 'fullName employeeId department');
+    const teachers = await Teacher.find({
+      isActive: true,
+      department: { $regex: new RegExp('^' + adminDept.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '$', 'i') }
+    }, 'fullName employeeId department');
 
     // Find absent teachers (no log for this date) — guard against null populate
     const presentIds = new Set(logs.map(l => l.teacherId._id.toString()));
@@ -304,7 +391,6 @@ const getAllAttendance = async (req, res, next) => {
         absent: absentTeachers,
         summary: {
           present: logs.filter(l => l.status === 'PRESENT').length,
-          late: logs.filter(l => l.status === 'LATE').length,
           absent: absentTeachers.length,
           total: teachers.length,
         },
@@ -319,7 +405,7 @@ const getAllAttendance = async (req, res, next) => {
 
 const cameraScan = async (req, res, next) => {
   try {
-    const { faceImage, userId: directUserId, gate = 'in' } = req.body;
+    const { faceImage, userId: directUserId, gate = 'in', confidence: directConfidence = null } = req.body;
 
     // ── Path A: WS live-detect already identified the teacher — record check-in or check-out ──
     if (directUserId && !faceImage) {
@@ -328,13 +414,17 @@ const cameraScan = async (req, res, next) => {
         return res.status(404).json({ success: false, message: 'Teacher not found' });
       }
       const today = getTodayDateString();
-      const existing = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
+      let query = AttendanceLog.findOne({ teacherId: teacher._id });
+      if (typeof query.sort === 'function') {
+        query = query.sort({ date: -1 });
+      }
+      const lastLog = await query;
       const io = req.app.get('io');
       const now = new Date();
 
-      const lastEvent = existing && existing.logs && existing.logs.length > 0
-        ? existing.logs[existing.logs.length - 1].event
-        : (existing && existing.checkInTime ? 'CHECK_IN' : null);
+      const lastEvent = lastLog && lastLog.logs && lastLog.logs.length > 0
+        ? lastLog.logs[lastLog.logs.length - 1].event
+        : (lastLog && lastLog.checkInTime ? 'CHECK_IN' : null);
 
       let isOutGate = gate === 'out';
       if (gate === 'auto') {
@@ -343,11 +433,25 @@ const cameraScan = async (req, res, next) => {
 
       if (isOutGate) {
         // ── CHECK-OUT via OUT gate ──
+        const existing = lastLog;
         if (!existing || lastEvent !== 'CHECK_IN') {
           return res.json({ success: true, data: { identified: true, autoCheckedOut: false, alreadyCheckedOut: true, reason: 'Not checked in or already checked out' } });
         }
+        const cooldownRemaining = getCooldownRemaining(existing, now);
+        if (cooldownRemaining > 0) {
+          return res.json({
+            success: true,
+            data: {
+              identified: true,
+              autoCheckedOut: false,
+              cooldown: true,
+              message: `Please wait ${cooldownRemaining} more seconds.`,
+              reason: `Please wait ${cooldownRemaining} more seconds before checking out.`
+            }
+          });
+        }
         existing.checkOutTime = now;
-        existing.logs.push({ event: 'CHECK_OUT', method: 'FACE', timestamp: now, confidence: null });
+        existing.logs.push({ event: 'CHECK_OUT', method: 'FACE', timestamp: now, confidence: directConfidence });
         await existing.save();
         if (io) io.emit('attendance:checkout', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now });
         return res.json({
@@ -357,13 +461,28 @@ const cameraScan = async (req, res, next) => {
       }
 
       // ── CHECK-IN via IN gate ──
+      const existing = (lastLog && lastLog.date === today) ? lastLog : null;
       let autoCheckedIn = false;
-      if (!existing || lastEvent !== 'CHECK_IN') {
-        const isLate = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
-        const logEntry = { event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: null };
+      if (lastEvent !== 'CHECK_IN') {
+        const cooldownRemaining = getCooldownRemaining(existing, now);
+        if (cooldownRemaining > 0) {
+          return res.json({
+            success: true,
+            data: {
+              identified: true,
+              autoCheckedIn: false,
+              cooldown: true,
+              message: `Please wait ${cooldownRemaining} more seconds.`,
+              reason: `Please wait ${cooldownRemaining} more seconds before checking in.`
+            }
+          });
+        }
+        const logEntry = { event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: directConfidence };
         if (existing) {
-          existing.checkInTime = existing.checkInTime || now;
-          existing.status = existing.checkInTime ? existing.status : (isLate ? 'LATE' : 'PRESENT');
+          existing.checkInTime = now;
+          existing.checkOutTime = null; // Clear check-out time on re-check-in
+          existing.status = 'PRESENT';
+          existing.confidenceScore = directConfidence;
           const methods = new Set([...(existing.verificationMethods || []), 'FACE']);
           existing.verificationMethods = [...methods];
           existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'FACE';
@@ -372,20 +491,22 @@ const cameraScan = async (req, res, next) => {
         } else {
           await AttendanceLog.create({
             teacherId: teacher._id, date: today, checkInTime: now,
-            status: isLate ? 'LATE' : 'PRESENT',
+            status: 'PRESENT',
             verificationMethod: 'FACE', verificationMethods: ['FACE'],
+            confidenceScore: directConfidence,
             location: 'Campus Entrance', logs: [logEntry],
           });
         }
         autoCheckedIn = true;
-        if (io) io.emit('attendance:checkin', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now, status: isLate ? 'LATE' : 'PRESENT' });
+        if (io) io.emit('attendance:checkin', { teacherId: teacher._id.toString(), teacherName: teacher.fullName, timestamp: now, status: 'PRESENT' });
       } else {
         // Already checked in. Make sure 'FACE' is in methods if they did voice first.
-        if (!existing.verificationMethods || !existing.verificationMethods.includes('FACE')) {
+        const cooldownRemaining = getCooldownRemaining(existing, now);
+        if (cooldownRemaining === 0 && existing && (!existing.verificationMethods || !existing.verificationMethods.includes('FACE'))) {
           const methods = new Set([...(existing.verificationMethods || []), 'FACE']);
           existing.verificationMethods = [...methods];
           existing.verificationMethod  = methods.size > 1 ? 'FACE+VOICE' : 'FACE';
-          existing.logs.push({ event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: null });
+          existing.logs.push({ event: 'CHECK_IN', method: 'FACE', timestamp: now, confidence: directConfidence });
           await existing.save();
         }
       }
@@ -435,17 +556,30 @@ const voiceCheckIn = async (req, res, next) => {
     const similarity = parseFloat(req.body.similarity) || 1;
 
     const today = getTodayDateString();
-    const existing = await AttendanceLog.findOne({ teacherId, date: today });
+    let query = AttendanceLog.findOne({ teacherId });
+    if (typeof query.sort === 'function') {
+      query = query.sort({ date: -1 });
+    }
+    const lastLog = await query;
     const teacher  = await Teacher.findById(teacherId).select('fullName');
     const io       = req.app.get('io');
     const now      = new Date();
 
-    const lastEvent = existing && existing.logs && existing.logs.length > 0
-        ? existing.logs[existing.logs.length - 1].event
-        : (existing && existing.checkInTime ? 'CHECK_IN' : null);
+    const lastEvent = lastLog && lastLog.logs && lastLog.logs.length > 0
+        ? lastLog.logs[lastLog.logs.length - 1].event
+        : (lastLog && lastLog.checkInTime ? 'CHECK_IN' : null);
 
     // If already checked in and NOT checked out, perform check-out!
-    if (existing && lastEvent === 'CHECK_IN') {
+    if (lastEvent === 'CHECK_IN') {
+      const existing = lastLog;
+      const cooldownRemaining = getCooldownRemaining(existing, now);
+      if (cooldownRemaining > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Please wait ${cooldownRemaining} more seconds before checking out.`,
+          data: { log: existing }
+        });
+      }
       existing.checkOutTime = now;
       
       const logEntry = { event: 'CHECK_OUT', method: 'VOICE', timestamp: now, confidence: similarity };
@@ -482,25 +616,25 @@ const voiceCheckIn = async (req, res, next) => {
       });
     }
 
-    // If they already checked out, prevent checking in again or allow it?
-    if (existing && lastEvent === 'CHECK_OUT') {
-      return res.json({
-        success: true,
-        data: {
-          alreadyCheckedOut: true,
-          checkInTime: existing.checkInTime,
-          checkOutTime: existing.checkOutTime,
-        }
+    const existing = (lastLog && lastLog.date === today) ? lastLog : null;
+
+    // If they already checked out, allow checking in again (fall through to check-in path)
+    const cooldownRemaining = getCooldownRemaining(existing, now);
+    if (cooldownRemaining > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Please wait ${cooldownRemaining} more seconds before checking in.`,
+        data: { log: existing }
       });
     }
 
-    const isLate   = now.getHours() > 9 || (now.getHours() === 9 && now.getMinutes() > 30);
     const logEntry = { event: 'CHECK_IN', method: 'VOICE', timestamp: now, confidence: similarity };
 
     let log;
     if (existing) {
-      existing.checkInTime    = existing.checkInTime || now;
-      existing.status         = existing.checkInTime ? existing.status : (isLate ? 'LATE' : 'PRESENT');
+      existing.checkInTime    = now;
+      existing.checkOutTime   = null; // Clear check-out time on re-check-in
+      existing.status         = 'PRESENT';
       // Merge VOICE into methods
       const currentMethods = existing.verificationMethods || [];
       const methods = new Set([...currentMethods, 'VOICE']);
@@ -516,7 +650,7 @@ const voiceCheckIn = async (req, res, next) => {
     } else {
       log = await AttendanceLog.create({
         teacherId, date: today, checkInTime: now,
-        status: isLate ? 'LATE' : 'PRESENT',
+        status: 'PRESENT',
         verificationMethod: 'VOICE', verificationMethods: ['VOICE'],
         voiceSimilarity: similarity, confidenceScore: similarity,
         location: 'Voice Check-In',
@@ -556,18 +690,42 @@ const getAdminTeacherHistory = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Teacher not found' });
     }
 
-    const logs = await AttendanceLog.find({ teacherId }).sort({ date: -1 });
+    const adminDept = (req.teacher.department || '').toLowerCase().trim();
+    const teacherDept = (teacher.department || '').toLowerCase().trim();
+    if (teacherDept !== adminDept) {
+      return res.status(403).json({ success: false, message: 'Access denied. Teacher belongs to a different department.' });
+    }
+
+    const queryCond = { teacherId };
+    if (req.query.startDate || req.query.endDate) {
+      queryCond.date = {};
+      if (req.query.startDate) queryCond.date.$gte = req.query.startDate;
+      if (req.query.endDate) queryCond.date.$lte = req.query.endDate;
+    }
+
+    const [logs, biometricLogs] = await Promise.all([
+      AttendanceLog.find(queryCond).sort({ date: -1 }),
+      BiometricLog.find({ teacherId }).sort({ timestamp: -1 })
+    ]);
 
     const total = logs.length;
     const present = logs.filter(l => l.status === 'PRESENT').length;
-    const late = logs.filter(l => l.status === 'LATE').length;
+
+    const latestVoiceLog = biometricLogs.find(l => l.biometricType === 'VOICE');
+    const voiceRegistered = latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false;
+
+    const latestFaceLog = biometricLogs.find(l => l.biometricType === 'FACE');
+    const faceRegistered = latestFaceLog ? (latestFaceLog.action !== 'DELETE') : (!!teacher.faceRegisteredAt);
 
     res.json({
       success: true,
       data: {
         teacher,
-        stats: { total, present, late },
-        logs
+        stats: { total, present },
+        logs,
+        biometricLogs: biometricLogs || [],
+        voiceRegistered,
+        faceRegistered
       }
     });
   } catch (err) {

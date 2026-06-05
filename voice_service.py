@@ -16,7 +16,10 @@ import io
 import logging
 import pickle
 import traceback
+import os
 from pathlib import Path
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 import numpy as np
 import uvicorn
@@ -24,6 +27,17 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from resemblyzer import VoiceEncoder, preprocess_wav
+
+try:
+    env_path = Path(__file__).parent / 'backend' / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+    else:
+        root_env = Path(__file__).parent / '.env'
+        if root_env.exists():
+            load_dotenv(root_env)
+except Exception:
+    pass
 
 load_dotenv()
 
@@ -37,6 +51,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── MongoDB client setup ──
+mongo_uri = os.getenv('MONGODB_URI', '')
+try:
+    mongo_client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=10000)
+except Exception as e:
+    print(f'⚠️ Motor connect warning: {e}')
+    mongo_client = AsyncIOMotorClient(mongo_uri)
+db = mongo_client.teacher_attendance
 
 # ── Storage dir for embeddings ─────────────────────────────────────────────────
 STORE_DIR = Path("voice_embeddings")
@@ -439,7 +462,7 @@ async def register_voice(
     """
     Register a teacher's voice fingerprint.
     Accepts WAV / WebM / OGG / MP3.
-    Stores a 120-dim MFCC embedding on disk.
+    Stores a 256-dim Resemblyzer embedding on disk and in MongoDB.
     """
     audio_bytes = await file.read()
     if len(audio_bytes) < 500:
@@ -459,9 +482,21 @@ async def register_voice(
         log.error(f"Resemblyzer embedding failed: {e}\n{traceback.format_exc()}")
         raise HTTPException(500, f"Embedding failed: {e}")
 
-    # Save 256-dim Resemblyzer embedding to the primary npy file
+    # Save 256-dim Resemblyzer embedding to disk
     path = embedding_path(user_id)
     np.save(str(path), embed)
+
+    # Save to MongoDB teachers collection
+    try:
+        encoding_bytes = embed.tobytes()
+        await db.teachers.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$set": {
+                "voiceEncoding": encoding_bytes
+            }}
+        )
+    except Exception as mongo_err:
+        log.error(f"⚠️ Failed to persist voice embedding in MongoDB: {mongo_err}")
 
     # Clean up any leftover legacy SVM or GMM pkl files for this user
     for ext in [".svm.pkl", ".gmm.pkl"]:
@@ -469,7 +504,7 @@ async def register_voice(
         if stray.exists():
             stray.unlink()
 
-    log.info(f"✅ Voice registered with Resemblyzer  user={user_id}  embed_dim={embed.shape[0]}  "
+    log.info(f"✅ Voice registered user={user_id}  embed_dim={embed.shape[0]}  "
              f"duration={len(wav)/16000:.1f}s  path={path}")
     return {
         "success": True,
@@ -491,7 +526,30 @@ async def verify_voice(
     Returns { verified, similarity, confidence }.
     """
     path = embedding_path(user_id)
-    if not path.exists():
+    embed_stored = None
+    if path.exists():
+        try:
+            embed_stored = np.load(str(path))
+        except Exception as err:
+            log.warning(f"Failed to load embedding from disk for user {user_id}: {err}")
+
+    if embed_stored is None:
+        try:
+            teacher = await db.teachers.find_one({"_id": ObjectId(user_id)})
+            if teacher and teacher.get('voiceEncoding'):
+                raw = teacher['voiceEncoding']
+                if hasattr(raw, 'read'):
+                    raw = raw.read()
+                elif not isinstance(raw, (bytes, bytearray)):
+                    raw = bytes(raw)
+                embed_stored = np.frombuffer(raw, dtype=np.float32)
+                # Cache on disk
+                np.save(str(path), embed_stored)
+                log.info(f"Loaded and re-cached voice embedding from MongoDB for user {user_id}")
+        except Exception as db_err:
+            log.error(f"Error reading voice encoding from MongoDB: {db_err}")
+
+    if embed_stored is None:
         raise HTTPException(404, f"No voice registered for user '{user_id}'. Please register first.")
 
     audio_bytes = await file.read()
@@ -556,7 +614,7 @@ async def verify_voice(
     if len(wav) < 8000:   # < 0.5 s
         raise HTTPException(400, "Recording too short for verification")
 
-    embed_stored = np.load(str(path))
+    # embed_stored has already been loaded and verified from cache or DB fallback
 
     if embed_stored.shape[0] == 256:
         # Secure Resemblyzer deep learning verification
@@ -589,20 +647,52 @@ async def verify_voice(
     }
 
 
+@app.get("/voice-status/{user_id}")
+async def check_voice_status(user_id: str):
+    path = embedding_path(user_id)
+    if path.exists():
+        return {"registered": True}
+    try:
+        teacher = await db.teachers.find_one({"_id": ObjectId(user_id)})
+        if teacher and teacher.get('voiceEncoding'):
+            return {"registered": True}
+    except Exception:
+        pass
+    return {"registered": False}
+
+
 @app.delete("/voice/{user_id}")
 async def delete_voice(user_id: str):
     path = embedding_path(user_id)
     deleted = False
     if path.exists():
-        path.unlink()
-        deleted = True
+        try:
+            path.unlink()
+            deleted = True
+        except Exception:
+            pass
+    
+    try:
+        res = await db.teachers.update_one(
+            {"_id": ObjectId(user_id)},
+            {"$unset": {
+                "voiceEncoding": ""
+            }}
+        )
+        if res.modified_count > 0:
+            deleted = True
+    except Exception as mongo_err:
+        log.error(f"Failed to delete voice from MongoDB: {mongo_err}")
     
     # Clean up any legacy SVM or GMM pkl files for this user
     for ext in [".svm.pkl", ".gmm.pkl"]:
         stray = STORE_DIR / f"{Path(path).stem}{ext}"
         if stray.exists():
-            stray.unlink()
-            deleted = True
+            try:
+                stray.unlink()
+                deleted = True
+            except Exception:
+                pass
             
     if deleted:
         return {"success": True, "message": "Voice registration deleted successfully"}

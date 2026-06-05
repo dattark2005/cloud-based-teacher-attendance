@@ -8,6 +8,7 @@ const request = require('supertest');
 // ── Mocks ────────────────────────────────────────────────────────────────────
 jest.mock('../models/Teacher');
 jest.mock('../models/AttendanceLog');
+jest.mock('../models/BiometricLog');
 jest.mock('axios');
 jest.mock('form-data', () => {
   return jest.fn().mockImplementation(() => ({
@@ -39,6 +40,7 @@ jest.mock('../middleware/auth', () => ({
 const app           = require('../server');
 const Teacher       = require('../models/Teacher');
 const AttendanceLog = require('../models/AttendanceLog');
+const BiometricLog  = require('../models/BiometricLog');
 const axios         = require('axios');
 
 // Auth header helper
@@ -67,6 +69,15 @@ const logFixture = {
   logs: [],
   save: jest.fn().mockResolvedValue(true),
 };
+
+beforeEach(() => {
+  BiometricLog.findOne.mockReturnValue({
+    sort: jest.fn().mockResolvedValue(null),
+  });
+  BiometricLog.find.mockReturnValue({
+    sort: jest.fn().mockResolvedValue([]),
+  });
+});
 
 afterEach(() => jest.clearAllMocks());
 
@@ -164,7 +175,11 @@ describe('POST /api/attendance/check-in', () => {
   });
 
   test('TC-26 — 400 when already checked in today', async () => {
-    AttendanceLog.findOne.mockResolvedValueOnce({ ...logFixture, checkInTime: new Date() });
+    AttendanceLog.findOne.mockResolvedValueOnce({
+      ...logFixture,
+      checkInTime: new Date(),
+      logs: [{ event: 'CHECK_IN' }],
+    });
     const res = await request(app)
       .post('/api/attendance/check-in')
       .set('Authorization', AUTH)
@@ -228,6 +243,7 @@ describe('POST /api/attendance/check-out', () => {
       ...logFixture,
       checkInTime: new Date(),
       checkOutTime: new Date(),
+      logs: [{ event: 'CHECK_IN' }, { event: 'CHECK_OUT' }],
     });
     const res = await request(app)
       .post('/api/attendance/check-out')
@@ -235,6 +251,29 @@ describe('POST /api/attendance/check-out', () => {
       .send({ faceImage: fakeBase64 });
     expect(res.status).toBe(400);
     expect(res.body.message).toMatch(/already checked out/i);
+  });
+
+  test('TC-31b — allows check-out on a different day if last log was CHECK_IN', async () => {
+    const oldLog = {
+      ...logFixture,
+      date: '2025-04-26',
+      checkInTime: new Date(Date.now() - 24 * 60 * 60 * 1000 - 3600000), // > 3 hours ago to clear cooldown
+      checkOutTime: null,
+      logs: [{ event: 'CHECK_IN', timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000 - 3600000) }],
+      save: jest.fn().mockResolvedValueOnce(true),
+    };
+    AttendanceLog.findOne.mockResolvedValueOnce(oldLog);
+    axios.post.mockResolvedValueOnce({ data: { verified: true, confidence: 0.95 } });
+
+    const res = await request(app)
+      .post('/api/attendance/check-out')
+      .set('Authorization', AUTH)
+      .send({ faceImage: fakeBase64 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(oldLog.save).toHaveBeenCalled();
+    expect(oldLog.logs[oldLog.logs.length - 1].event).toBe('CHECK_OUT');
   });
 });
 
@@ -268,7 +307,7 @@ describe('GET /api/attendance/history', () => {
 
   test('TC-34 — 200 returns correct pagination with parsed int limit', async () => {
     const mockFind = { sort: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(), limit: jest.fn().mockResolvedValueOnce([]) };
-    AttendanceLog.find.mockReturnValueOnce(mockFind).mockReturnValueOnce([]);
+    AttendanceLog.find.mockReturnValueOnce(mockFind).mockReturnValueOnce([]).mockReturnValueOnce([]);
     AttendanceLog.countDocuments.mockResolvedValueOnce(0);
 
     const res = await request(app)
@@ -281,13 +320,13 @@ describe('GET /api/attendance/history', () => {
     expect(mockFind.limit).toHaveBeenCalledWith(10);
   });
 
-  test('TC-35 — stats present + late counted from allLogs not just page', async () => {
+  test('TC-35 — stats present + absent counted from allLogs not just page', async () => {
     const presentLog = { status: 'PRESENT' };
-    const lateLog    = { status: 'LATE' };
+    const otherLog    = { status: 'ABSENT' };
     // paginated slice has 1 item, but allLogs has 3
     const mockFind1 = { sort: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(), limit: jest.fn().mockResolvedValueOnce([presentLog]) };
-    const allLogs   = [presentLog, lateLog, lateLog];
-    AttendanceLog.find.mockReturnValueOnce(mockFind1).mockReturnValueOnce(allLogs);
+    const allLogs   = [presentLog, otherLog, otherLog];
+    AttendanceLog.find.mockReturnValueOnce(mockFind1).mockReturnValueOnce(allLogs).mockReturnValueOnce([]);
     AttendanceLog.countDocuments.mockResolvedValueOnce(3);
 
     const res = await request(app)
@@ -296,8 +335,25 @@ describe('GET /api/attendance/history', () => {
     expect(res.status).toBe(200);
     // Stats should reflect allLogs, not just the page
     expect(res.body.data.stats.present).toBe(1);
-    expect(res.body.data.stats.late).toBe(2);
+    expect(res.body.data.stats.absent).toBe(2);
     expect(res.body.data.stats.total).toBe(3);
+  });
+
+  test('TC-35b — correctly filters history by startDate and endDate', async () => {
+    const mockFind = { sort: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(), limit: jest.fn().mockResolvedValueOnce([]) };
+    AttendanceLog.find.mockReturnValueOnce(mockFind).mockReturnValueOnce([]).mockReturnValueOnce([]);
+    AttendanceLog.countDocuments.mockResolvedValueOnce(0);
+
+    const res = await request(app)
+      .get('/api/attendance/history?startDate=2026-06-01&endDate=2026-06-05')
+      .set('Authorization', AUTH);
+
+    expect(res.status).toBe(200);
+    const findCall = AttendanceLog.find.mock.calls[0];
+    expect(findCall[0]).toEqual({
+      teacherId: 'teacher123',
+      date: { $gte: '2026-06-01', $lte: '2026-06-05' }
+    });
   });
 });
 
@@ -355,16 +411,6 @@ describe('Utility functions — getTodayDateString', () => {
     expect(parts[2].length).toBe(2);
   });
 
-  test('TC-40 — isLate logic: 9:30 AM boundary', () => {
-    // isLate = hours > 9 || (hours === 9 && minutes > 30)
-    const checkLate = (h, m) => h > 9 || (h === 9 && m > 30);
-    expect(checkLate(9, 30)).toBe(false);  // 9:30 exactly = NOT late
-    expect(checkLate(9, 31)).toBe(true);   // 9:31 = late
-    expect(checkLate(10, 0)).toBe(true);   // 10:00 = late
-    expect(checkLate(8, 59)).toBe(false);  // 8:59 = not late
-    expect(checkLate(9, 0)).toBe(false);   // 9:00 = not late
-  });
-
   test('TC-41 — base64 strip regex handles all image types', () => {
     const strip = (s) => s.replace(/^data:image\/\w+;base64,/, '');
     expect(strip('data:image/jpeg;base64,ABC')).toBe('ABC');
@@ -374,8 +420,8 @@ describe('Utility functions — getTodayDateString', () => {
   });
 
   test('TC-42 — absent count never goes negative (Math.max guard)', () => {
-    // If somehow present+late > total, absent should be 0 not negative
-    const absent = Math.max(0, 5 - 3 - 4); // would be -2 without guard
+    // If somehow present > total, absent should be 0 not negative
+    const absent = Math.max(0, 5 - 7); // would be -2 without guard
     expect(absent).toBe(0);
   });
 });
@@ -421,10 +467,115 @@ describe('Teacher routes', () => {
       .set('Authorization', AUTH)
       .send({ faceImage: fakeBase64 });
 
-    // findByIdAndUpdate should be called WITHOUT faceRegisteredAt when success=false
     const updateCall = Teacher.findByIdAndUpdate.mock.calls[0];
     if (updateCall) {
       expect(updateCall[1]).not.toHaveProperty('faceRegisteredAt');
     }
+  });
+
+  test('TC-50 — PUT /api/teachers/profile — 200 updates details successfully', async () => {
+    const updatedFixture = { ...teacherFixture, fullName: 'New Name', designation: 'Professor' };
+    Teacher.findByIdAndUpdate.mockResolvedValueOnce(updatedFixture);
+
+    const res = await request(app)
+      .put('/api/teachers/profile')
+      .set('Authorization', AUTH)
+      .send({ fullName: 'New Name', designation: 'Professor' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.teacher.fullName).toBe('New Name');
+    expect(res.body.data.teacher.designation).toBe('Professor');
+  });
+
+  test('TC-51 — PUT /api/teachers/change-password — 400 when old password incorrect', async () => {
+    const mockTeacher = {
+      comparePassword: jest.fn().mockResolvedValueOnce(false),
+    };
+    Teacher.findById.mockReturnValueOnce({
+      select: jest.fn().mockResolvedValueOnce(mockTeacher),
+    });
+
+    const res = await request(app)
+      .put('/api/teachers/change-password')
+      .set('Authorization', AUTH)
+      .send({ currentPassword: 'wrongpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/incorrect current password/i);
+  });
+
+  test('TC-52 — PUT /api/teachers/change-password — 200 updates password successfully', async () => {
+    const mockTeacher = {
+      comparePassword: jest.fn().mockResolvedValueOnce(true),
+      save: jest.fn().mockResolvedValueOnce(true),
+    };
+    Teacher.findById.mockReturnValueOnce({
+      select: jest.fn().mockResolvedValueOnce(mockTeacher),
+    });
+
+    const res = await request(app)
+      .put('/api/teachers/change-password')
+      .set('Authorization', AUTH)
+      .send({ currentPassword: 'correctpassword', newPassword: 'newpassword123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(mockTeacher.save).toHaveBeenCalled();
+  });
+});
+
+// ── Cooldown validation tests ───────────────────────────────────────────────
+describe('Attendance Cooldown Constraints (3 minutes)', () => {
+  const fakeBase64 = 'data:image/jpeg;base64,' + Buffer.alloc(100).toString('base64');
+
+  test('TC-47 — check-in blocks within 3 minutes of last checkout', async () => {
+    const recently = new Date(Date.now() - 60000); // 1 minute ago
+    AttendanceLog.findOne.mockResolvedValueOnce({
+      ...logFixture,
+      logs: [{ event: 'CHECK_IN', timestamp: new Date(recently.getTime() - 60000) }, { event: 'CHECK_OUT', timestamp: recently }],
+    });
+
+    const res = await request(app)
+      .post('/api/attendance/check-in')
+      .set('Authorization', AUTH)
+      .send({ faceImage: fakeBase64 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/please wait \d+ more seconds before checking in/i);
+  });
+
+  test('TC-48 — check-out blocks within 3 minutes of last check-in', async () => {
+    const recently = new Date(Date.now() - 60000); // 1 minute ago
+    AttendanceLog.findOne.mockResolvedValueOnce({
+      ...logFixture,
+      logs: [{ event: 'CHECK_IN', timestamp: recently }],
+    });
+
+    const res = await request(app)
+      .post('/api/attendance/check-out')
+      .set('Authorization', AUTH)
+      .send({ faceImage: fakeBase64 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/please wait \d+ more seconds before checking out/i);
+  });
+
+  test('TC-49 — camera-scan returns cooldown status within 3 minutes', async () => {
+    const recently = new Date();
+    Teacher.findById.mockReturnValue({ select: jest.fn().mockResolvedValue(teacherFixture) });
+    AttendanceLog.findOne.mockResolvedValueOnce({
+      ...logFixture,
+      logs: [{ event: 'CHECK_IN', timestamp: recently }],
+    });
+
+    const res = await request(app)
+      .post('/api/attendance/camera-scan')
+      .set('Authorization', AUTH)
+      .send({ userId: 'teacher123', gate: 'out' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.cooldown).toBe(true);
+    expect(res.body.data.message).toMatch(/please wait \d+ more seconds/i);
   });
 });

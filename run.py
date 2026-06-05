@@ -138,6 +138,8 @@ IMPORT_TO_PKG = {
     "resemblyzer":   "resemblyzer>=0.1.1.dev0",
     "librosa":       "librosa>=0.10.0",
     "soundfile":     "soundfile>=0.12.1",
+    "speech_recognition": "SpeechRecognition>=3.10.0",
+    "av":            "av>=12.0.0",
 }
 
 PKG_INSTALL_NAME = {
@@ -158,13 +160,15 @@ PKG_INSTALL_NAME = {
     "resemblyzer":   "resemblyzer",
     "librosa":       "librosa",
     "soundfile":     "soundfile",
+    "speech_recognition": "SpeechRecognition",
+    "av":            "av",
 }
 
 
 def check_and_install_imports():
     """Check every package face_service.py needs. Auto-install if missing."""
     import importlib
-    print(c(BOLD+WHITE, "  [1/3] Checking Python imports...\n"))
+    print(c(BOLD+WHITE, "  [*] Checking Python imports...\n"))
     missing = []
     for mod, req in IMPORT_TO_PKG.items():
         try:
@@ -209,7 +213,7 @@ def check_and_install_imports():
 def run_python_tests():
     """Run pytest on tests/ directory."""
     print()
-    print(c(BOLD+WHITE, "  [2/3] Running Python tests (pytest)...\n"))
+    print(c(BOLD+WHITE, "  [*] Running Python tests (pytest)...\n"))
     test_files = list((ROOT / "tests").glob("test_*.py"))
     if not test_files:
         print(c(YELLOW, "  [!]  No Python test files found in tests/"))
@@ -222,7 +226,7 @@ def run_python_tests():
 def run_js_tests():
     """Run Jest tests in backend/."""
     print()
-    print(c(BOLD+WHITE, "  [3/3] Running Node.js tests (Jest)...\n"))
+    print(c(BOLD+WHITE, "  [*] Running Node.js tests (Jest)...\n"))
     if not (BACKEND_DIR / "node_modules").exists():
         print(c(YELLOW, "  [*]  Installing backend npm deps first..."))
         subprocess.run(["npm", "install"], cwd=str(BACKEND_DIR), shell=True)
@@ -265,14 +269,18 @@ def run_tests():
 def main():
     print_banner()
 
-    # Step 1 — npm deps
-    print(c(BOLD+WHITE, "  [1/4] Checking npm dependencies...\n"))
+    # Step 1 — Python dependencies check & auto-install
+    check_and_install_imports()
+    print()
+
+    # Step 2 — npm deps
+    print(c(BOLD+WHITE, "  [2/5] Checking npm dependencies...\n"))
     ensure_npm_deps(BACKEND_DIR,  "Backend")
     ensure_npm_deps(FRONTEND_DIR, "Frontend")
     print()
 
-    # Step 2 — Python Face Service (port 8000)
-    print(c(BOLD+WHITE, "  [1/5] Starting Python Face Service on :8000...\n"))
+    # Step 3 — Python Face Service (port 8000)
+    print(c(BOLD+WHITE, "  [3/5] Starting Python Face Service on :8000...\n"))
     face_proc = subprocess.Popen(
         [sys.executable, "face_service.py"],
         cwd=str(ROOT),
@@ -289,10 +297,10 @@ def main():
     wait_for_service("http://localhost:8000/health", "Face Service", MAGENTA, timeout=90)
     print()
 
-    # Step 2b — Python Voice Service (port 8001)
+    # Step 4 — Python Voice Service (port 8001)
     voice_svc_file = ROOT / "voice_service.py"
     if voice_svc_file.exists():
-        print(c(BOLD+WHITE, "  [2/5] Starting Python Voice Service on :8001...\n"))
+        print(c(BOLD+WHITE, "  [4/5] Starting Python Voice Service on :8001...\n"))
         voice_proc = subprocess.Popen(
             [sys.executable, "voice_service.py"],
             cwd=str(ROOT),
@@ -309,8 +317,8 @@ def main():
         print(c(YELLOW, "  [~] voice_service.py not found — skipping Voice Service"))
     print()
 
-    # Step 3 — Node.js Backend (port 5000)
-    print(c(BOLD+WHITE, "  [3/5] Starting Node.js Backend on :5000...\n"))
+    # Step 5 — Node.js Backend (port 5000)
+    print(c(BOLD+WHITE, "  [5/5] Starting Node.js Backend on :5000...\n"))
     node_proc = subprocess.Popen(
         ["npm", "run", "dev"],
         cwd=str(BACKEND_DIR),
@@ -326,10 +334,10 @@ def main():
     wait_for_service("http://localhost:5000/health", "Node Backend", GREEN, timeout=20)
     print()
 
-    # Step 4 — Vite Frontend (port 3000)
+    # Step 6 — Vite Frontend (port 3000)
     # On Windows, Vite writes to stderr which gets swallowed by pipes.
     # Launch in its own visible console window so output always shows.
-    print(c(BOLD+WHITE, "  [4/5] Starting Vite Frontend on :3000...\n"))
+    print(c(BOLD+WHITE, "  [6/6] Starting Vite Frontend on :3000...\n"))
     vite_proc = subprocess.Popen(
         'start "[Frontend] Vite Dev Server" cmd /k "npm run dev"',
         cwd=str(FRONTEND_DIR),

@@ -11,6 +11,8 @@ let recordTimer    = null;
 let recordSecs     = 0;
 let mode           = 'verify';   // 'register' | 'verify'
 let challengeToken = null;       // anti-deepfake: server-issued challenge
+let voiceIsRegistered = false;   // check if voice profile is already registered
+let tempWavBlob    = null;       // temp storage for voice registration
 
 const VOICE_API = 'http://localhost:8001';
 
@@ -84,10 +86,10 @@ export function renderVoice() {
     <div class="gate-toggle-bar mb-4">
       <div class="gate-toggle-label">Mode:</div>
       <div class="gate-toggle-group">
-        <button class="gate-btn" id="btn-mode-verify" data-mode="verify">
+        <button class="gate-btn btn-verify" id="btn-mode-verify" data-mode="verify">
           ✅ Mark Attendance
         </button>
-        <button class="gate-btn" id="btn-mode-register" data-mode="register">
+        <button class="gate-btn btn-register" id="btn-mode-register" data-mode="register">
           🎙️ Register Voice
         </button>
       </div>
@@ -144,6 +146,12 @@ export function renderVoice() {
           🎙️ Click to Record
         </button>
 
+        <!-- Register Save / Discard buttons -->
+        <div id="register-actions" class="hidden" style="display:flex;gap:12px;width:100%;max-width:280px">
+          <button id="btn-register-save" class="btn btn-accent" style="flex:1;font-size:14px;padding:12px 0">💾 Save & Register</button>
+          <button id="btn-register-discard" class="btn btn-ghost" style="flex:1;font-size:14px;padding:12px 0">🗑️ Discard</button>
+        </div>
+
         <!-- Status pill -->
         <div id="voice-status" class="gate-status-pill gate-in" style="width:100%;text-align:center">
           Ready — click the button to start recording
@@ -181,31 +189,109 @@ export function renderVoice() {
       </div>
     </div>
   </div>
+
+  <!-- Custom Voice Overwrite Confirmation Modal -->
+  <div id="voice-confirm-modal" class="hidden" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.8);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;">
+    <div class="card" style="width:100%;max-width:400px;position:relative;text-align:center;padding:24px">
+      <h3 class="font-bold mb-2" style="font-size:18px">⚠️ Overwrite Voice?</h3>
+      <p class="text-muted text-sm mb-6">You have already registered your voice. Are you sure you want to overwrite and update your voice registration?</p>
+      <div style="display:flex;gap:12px;justify-content:center">
+        <button class="btn btn-accent" id="btn-voice-confirm-yes" style="padding:10px 24px">Yes, Overwrite</button>
+        <button class="btn btn-ghost" id="btn-voice-confirm-no" style="padding:10px 24px">Cancel</button>
+      </div>
+    </div>
+  </div>
 </div>`;
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
-export function initVoice() {
+export async function initVoice() {
   // Clock
   setInterval(() => {
     const el = document.getElementById('voice-clock');
     if (el) el.textContent = new Date().toLocaleTimeString('en-IN');
   }, 1000);
 
-  // Mode toggle — default to 'register' so first-timers register first
-  setMode('register');
+  // Check voice status and default mode accordingly
+  let userId = null;
+  let voiceRegisteredFromBackend = false;
+  try {
+    const profileRes = await apiFetch('/teachers/profile');
+    const teacher = profileRes.data?.teacher || {};
+    userId = teacher.id || teacher._id || teacher.employeeId;
+    voiceRegisteredFromBackend = !!teacher.voiceRegistered;
+  } catch (err) {
+    console.warn('⚠️ Profile fetch failed, falling back to local storage:', err);
+    const teacher = getTeacher() || {};
+    userId = teacher._id || teacher.id || teacher.employeeId;
+    voiceRegisteredFromBackend = !!teacher.voiceRegistered;
+  }
+
+  if (userId) {
+    voiceIsRegistered = voiceRegisteredFromBackend;
+    if (voiceIsRegistered) {
+      setMode('verify');
+    } else {
+      setMode('register');
+    }
+  } else {
+    voiceIsRegistered = false;
+    setMode('register');
+  }
+
   document.querySelectorAll('[data-mode]').forEach(btn => {
-    btn.addEventListener('click', () => setMode(btn.dataset.mode));
+    btn.addEventListener('click', async (e) => {
+      const targetMode = btn.dataset.mode;
+      if (targetMode === 'register' && voiceIsRegistered) {
+        const confirmSwitch = await askVoiceOverwriteConfirmation();
+        if (!confirmSwitch) {
+          return;
+        }
+      }
+      setMode(targetMode);
+    });
   });
 
   // Record button — click to toggle (start / stop)
   const btn = document.getElementById('btn-record');
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', async () => {
     if (isRecording) {
       stopRecording();
     } else {
+      if (mode === 'register' && voiceIsRegistered) {
+        const confirmUpdate = await askVoiceOverwriteConfirmation();
+        if (!confirmUpdate) return;
+      }
       startRecording();
     }
+  });
+
+  // Register Save / Discard Button Handlers
+  document.getElementById('btn-register-save')?.addEventListener('click', async () => {
+    if (!tempWavBlob) return;
+    const saveBtn = document.getElementById('btn-register-save');
+    const discardBtn = document.getElementById('btn-register-discard');
+    saveBtn.disabled = true;
+    discardBtn.disabled = true;
+    saveBtn.innerHTML = '<span class="spinner"></span> Registering...';
+
+    await doRegister(tempWavBlob);
+
+    saveBtn.disabled = false;
+    discardBtn.disabled = false;
+    saveBtn.textContent = '💾 Save & Register';
+    document.getElementById('register-actions').classList.add('hidden');
+    document.getElementById('btn-record').classList.remove('hidden');
+    tempWavBlob = null;
+  });
+
+  document.getElementById('btn-register-discard')?.addEventListener('click', () => {
+    tempWavBlob = null;
+    document.getElementById('register-actions').classList.add('hidden');
+    document.getElementById('btn-record').classList.remove('hidden');
+    setRingState('idle');
+    setStatus('Ready — click the button to start recording', 'in');
+    showToast('Discarded', 'Recorded voice sample discarded', 'info');
   });
 
   // Expose sentence helper — in verify mode re-fetch from server
@@ -246,6 +332,12 @@ async function fetchChallenge() {
 
 function setMode(m) {
   mode = m;
+  tempWavBlob = null;
+  const regActions = document.getElementById('register-actions');
+  const recBtn = document.getElementById('btn-record');
+  if (regActions) regActions.classList.add('hidden');
+  if (recBtn) recBtn.classList.remove('hidden');
+
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
 
   const title    = document.getElementById('voice-title');
@@ -296,6 +388,14 @@ const PCM_BUFFER_SIZE = 4096;
 
 async function startRecording() {
   if (isRecording) return;
+  isRecording = true;
+
+  const btnEl = document.getElementById('btn-record');
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳ Starting...';
+  }
+
   try {
     audioStream = await navigator.mediaDevices.getUserMedia({
       audio: { sampleRate: PCM_SAMPLE_RATE, channelCount: 1,
@@ -320,28 +420,37 @@ async function startRecording() {
 
     source.connect(scriptProc);
     scriptProc.connect(audioContext.destination);  // must connect to destination to fire
-    isRecording = true;
     console.log('[Voice] AudioContext state:', audioContext.state, '| sampleRate:', audioContext.sampleRate);
 
     // Timer
     recordSecs = 0;
-    document.getElementById('rec-timer').style.display = 'block';
+    const timerEl = document.getElementById('rec-timer');
+    if (timerEl) {
+      timerEl.textContent = '0:00';
+      timerEl.style.display = 'block';
+    }
+    if (recordTimer) clearInterval(recordTimer);
     recordTimer = setInterval(() => {
       recordSecs++;
       const m = Math.floor(recordSecs / 60);
       const s = recordSecs % 60;
-      const el = document.getElementById('rec-timer');
-      if (el) el.textContent = `${m}:${String(s).padStart(2, '0')}`;
+      if (timerEl) timerEl.textContent = `${m}:${String(s).padStart(2, '0')}`;
     }, 1000);
 
     setRingState('recording');
-    const btnEl = document.getElementById('btn-record');
     if (btnEl) {
+      btnEl.disabled = false;
       btnEl.textContent = '⏹️ Click to Stop';
       btnEl.style.background = 'linear-gradient(135deg,#ef4444,#dc2626)';
     }
     setStatus('🔴 Recording… click button to stop', 'out');
   } catch (err) {
+    isRecording = false;
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = '🎙️ Click to Record';
+      btnEl.style.background = '';
+    }
     showToast('Microphone Error', 'Please allow microphone permission in your browser', 'error');
     console.error('[Voice] getUserMedia error:', err);
   }
@@ -405,7 +514,11 @@ async function stopRecording() {
   }
 
   if (mode === 'register') {
-    await doRegister(wavBlob);
+    tempWavBlob = wavBlob;
+    document.getElementById('btn-record').classList.add('hidden');
+    document.getElementById('register-actions').classList.remove('hidden');
+    setRingState('success');
+    setStatus('Voice captured! Click Save to register or Discard to retry.', 'in');
   } else {
     await doVerify(wavBlob);
   }
@@ -431,6 +544,8 @@ async function doRegister(wavBlob) {
   const teacher = getTeacher();
   if (!teacher) { showToast('Not logged in', '', 'error'); return; }
 
+  const isUpdate = voiceIsRegistered;
+
   try {
     const userId = teacher._id || teacher.id || teacher.employeeId;
     console.log('[Register] user_id:', userId, '| wav size:', wavBlob.size);
@@ -446,6 +561,7 @@ async function doRegister(wavBlob) {
     if (!res.ok || !data.success) throw new Error(data.detail || data.message || 'Registration failed');
 
     setRingState('success');
+    voiceIsRegistered = true;
     setStatus('✅ Voice registered successfully!', 'in');
     showToast('🎤 Voice Registered', `${Math.round(data.duration_sec)}s sample saved`, 'success');
     showResult({
@@ -453,6 +569,20 @@ async function doRegister(wavBlob) {
       title: '✅ Voice Registered',
       message: `Voice profile saved (${Math.round(data.duration_sec)}s, ${data.embedding_dim}-dim). Now switch to Mark Attendance.`,
     });
+
+    // Save voice log entry to Node.js backend
+    try {
+      await apiFetch('/teachers/biometric-log', {
+        method: 'POST',
+        body: JSON.stringify({
+          biometricType: 'VOICE',
+          action: isUpdate ? 'UPDATE' : 'REGISTER',
+          details: `Voice profile registered (${Math.round(data.duration_sec)}s sample, ${data.embedding_dim}-dim)`,
+        }),
+      });
+    } catch (logErr) {
+      console.warn('⚠️ Failed to save voice log to backend:', logErr);
+    }
   } catch (err) {
     console.error('[Register] Error:', err);
     setRingState('idle');
@@ -608,6 +738,21 @@ export async function loadVoiceLog() {
   try {
     const teacher = getTeacher();
     if (!teacher) return;
+
+    // Refresh voiceIsRegistered status from backend profile
+    apiFetch('/teachers/profile')
+      .then(res => {
+        const t = res.data?.teacher;
+        if (t) {
+          voiceIsRegistered = !!t.voiceRegistered;
+          // Sync with local storage
+          const current = JSON.parse(localStorage.getItem('ta_teacher') || '{}');
+          current.voiceRegistered = t.voiceRegistered;
+          localStorage.setItem('ta_teacher', JSON.stringify(current));
+        }
+      })
+      .catch(err => console.warn('⚠️ Failed to refresh voice status in loadVoiceLog:', err));
+
     const isAdmin = teacher.role === 'admin';
     
     let logs = [];
@@ -650,4 +795,37 @@ export async function loadVoiceLog() {
       }).join('');
     }).join('');
   } catch { /* silent */ }
+}
+
+export function askVoiceOverwriteConfirmation() {
+  return new Promise((resolve) => {
+    const modal = document.getElementById('voice-confirm-modal');
+    if (!modal) {
+      resolve(false);
+      return;
+    }
+    modal.classList.remove('hidden');
+
+    const btnYes = document.getElementById('btn-voice-confirm-yes');
+    const btnNo = document.getElementById('btn-voice-confirm-no');
+
+    const handleYes = () => {
+      cleanup();
+      resolve(true);
+    };
+
+    const handleNo = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      if (btnYes) btnYes.removeEventListener('click', handleYes);
+      if (btnNo) btnNo.removeEventListener('click', handleNo);
+    };
+
+    if (btnYes) btnYes.addEventListener('click', handleYes);
+    if (btnNo) btnNo.addEventListener('click', handleNo);
+  });
 }
