@@ -14,7 +14,7 @@ let challengeToken = null;       // anti-deepfake: server-issued challenge
 let voiceIsRegistered = false;   // check if voice profile is already registered
 let tempWavBlob    = null;       // temp storage for voice registration
 
-const VOICE_API = 'http://localhost:8001';
+const VOICE_API = import.meta.env.VITE_VOICE_SERVICE_URL || 'http://localhost:8001';
 
 // ── Random sentences for guided recording ──────────────────────────────────
 const RANDOM_SENTENCES = [

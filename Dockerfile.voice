@@ -1,0 +1,23 @@
+FROM python:3.10-slim
+
+# Install system dependencies for soundfile (libsndfile1) and PyAV (ffmpeg)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the service code
+COPY voice_service.py .
+
+EXPOSE 8001
+
+ENV PORT=8001
+
+# Start FastAPI server using uvicorn
+CMD ["uvicorn", "voice_service:app", "--host", "0.0.0.0", "--port", "8001"]

@@ -15,7 +15,7 @@ const THROTTLE_MS = 10000;     // 10 seconds throttle per user per gate
 // Gate mode: 'auto' = automatic loop, 'in' = check-in, 'out' = check-out
 let gateMode = 'auto';
 
-const WS_URL = `ws://localhost:8000/ws/live-detect`;
+const WS_URL = import.meta.env.VITE_FACE_WS_URL || `ws://localhost:8000/ws/live-detect`;
 
 // ── Smooth box interpolation ───────────────────────────────────────────────
 let currentBoxes = [];

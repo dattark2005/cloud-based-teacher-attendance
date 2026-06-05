@@ -1,5 +1,5 @@
 // ── API Client ── Use relative path so Vite proxy works correctly
-const API = '/api';
+const API = import.meta.env.VITE_BACKEND_URL || '/api';
 
 export async function apiFetch(endpoint, options = {}) {
   const token = localStorage.getItem('ta_token');
