@@ -2,10 +2,11 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# Copy package files from backend subdirectory relative to repository root build context
+# Copy package files from backend subdirectory
 COPY backend/package*.json ./
 
-RUN npm ci --only=production
+# Use npm install --omit=dev which is more resilient to lockfile sync issues than npm ci
+RUN npm install --omit=dev
 
 # Copy the rest of backend files
 COPY backend/ .
