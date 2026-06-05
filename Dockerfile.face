@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system dependencies for OpenCV (GUI dependencies are stripped, but core libraries are needed)
+# Install system dependencies for OpenCV
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
+# Copy face requirements and install dependencies
+COPY requirements.face.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the service code and face models
