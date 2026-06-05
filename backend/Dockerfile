@@ -2,11 +2,13 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
+# Copy package files from backend subdirectory relative to repository root build context
+COPY backend/package*.json ./
 
 RUN npm ci --only=production
 
-COPY . .
+# Copy the rest of backend files
+COPY backend/ .
 
 ENV NODE_ENV=production
 
