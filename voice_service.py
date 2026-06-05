@@ -420,6 +420,10 @@ CHALLENGE_PHRASES = [
     "Let us begin the class",
 ]
 
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "Voice Attendance Service is running"}
+
 @app.get("/get-challenge")
 def get_challenge():
     """

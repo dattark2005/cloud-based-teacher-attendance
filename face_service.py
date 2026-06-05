@@ -346,6 +346,10 @@ async def identify_face_endpoint(file: UploadFile = File(...)):
         raise HTTPException(500, detail=str(e))
 
 
+@app.get("/")
+def read_root():
+    return {"status": "ok", "message": "Face Recognition Service is running"}
+
 @app.get("/health")
 def health_check():
     return {
