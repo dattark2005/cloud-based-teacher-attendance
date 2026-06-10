@@ -1,0 +1,52 @@
+services:
+  # ──────────────────────────────────────────────
+  # 1.  Node.js  Backend  (Express + Socket.io)
+  # ──────────────────────────────────────────────
+  - type: web
+    name: teacher-attendance-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .          # build context is repo root so COPY backend/ works
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        value: teacher_attendance_secret_2026
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: MONGODB_URI
+        sync: false           # fill in on the Render dashboard
+      - key: CLOUDINARY_CLOUD_NAME
+        value: dbtysa7x9
+      - key: CLOUDINARY_API_KEY
+        value: "675454522428184"
+      - key: CLOUDINARY_API_SECRET
+        sync: false           # fill in on the Render dashboard (keep it secret)
+      - key: FRONTEND_URL
+        sync: false           # your Vercel URL, e.g. https://your-app.vercel.app
+      # Point to the face service defined below
+      - key: FACE_SERVICE_URL
+        fromService:
+          name: teacher-attendance-face
+          type: web
+          property: host      # Render injects https://...-face.onrender.com
+
+  # ──────────────────────────────────────────────
+  # 2.  Python  Face-Recognition  Service
+  # ──────────────────────────────────────────────
+  - type: web
+    name: teacher-attendance-face
+    runtime: docker
+    dockerfilePath: ./Dockerfile.face
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: MONGODB_URI
+        sync: false           # same Atlas URI as the backend
+      - key: CLOUDINARY_CLOUD_NAME
+        value: dbtysa7x9
+      - key: CLOUDINARY_API_KEY
+        value: "675454522428184"
+      - key: CLOUDINARY_API_SECRET
+        sync: false
