@@ -24,9 +24,16 @@ const app = express();
 const httpServer = http.createServer(app);
 
 // Socket.io for real-time updates
+// Allow main Vercel URL + any Vercel preview deployments
+const allowedOrigins = [
+  process.env.FRONTEND_URL || 'http://localhost:3000',
+  'http://localhost:3000',
+  /\.vercel\.app$/,   // any Vercel preview URL
+];
+
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: allowedOrigins,
     methods: ['GET', 'POST'],
   },
 });
@@ -45,7 +52,19 @@ connectDB();
 // Middleware
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, etc.)
+    if (!origin) return callback(null, true);
+    const allowed = [
+      process.env.FRONTEND_URL || 'http://localhost:3000',
+      'http://localhost:3000',
+    ];
+    // Also allow any *.vercel.app preview URL
+    if (allowed.includes(origin) || /\.vercel\.app$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
 }));
 app.use(express.json({ limit: '15mb' }));
