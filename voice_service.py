@@ -54,6 +54,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
+    async def run_warmup():
+        global _encoder
+        if _encoder is not None:
+            try:
+                log.info("Warming up VoiceEncoder in background...")
+                dummy_wav = np.zeros(16000 * 3, dtype=np.float32)
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: _encoder.embed_utterance(preprocess_wav(dummy_wav, source_sr=16000)))
+                log.info("✅ VoiceEncoder warmup complete")
+            except Exception as warmup_err:
+                log.warning(f"⚠️ VoiceEncoder warmup failed: {warmup_err}")
+    asyncio.create_task(run_warmup())
+
 # ── MongoDB client setup ──
 mongo_uri = os.getenv('MONGODB_URI', '')
 try:
@@ -346,14 +362,6 @@ try:
     log.info("Loading Resemblyzer VoiceEncoder on CPU at startup...")
     _encoder = VoiceEncoder(device="cpu")
     log.info("✅ Resemblyzer VoiceEncoder loaded successfully")
-    # Warm up the encoder with a dummy input (3 seconds of silence) to prevent first-request PyTorch compilation latency
-    try:
-        log.info("Warming up VoiceEncoder...")
-        dummy_wav = np.zeros(16000 * 3, dtype=np.float32)
-        _encoder.embed_utterance(preprocess_wav(dummy_wav, source_sr=16000))
-        log.info("✅ VoiceEncoder warmup complete")
-    except Exception as warmup_err:
-        log.warning(f"⚠️ VoiceEncoder warmup failed: {warmup_err}")
 except Exception as e:
     log.error(f"❌ Failed to load Resemblyzer VoiceEncoder: {e}")
     _encoder = None
