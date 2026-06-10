@@ -27,6 +27,8 @@ from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from resemblyzer import VoiceEncoder, preprocess_wav
+import torch
+torch.set_num_threads(1)
 
 try:
     env_path = Path(__file__).parent / 'backend' / '.env'
