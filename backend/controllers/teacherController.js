@@ -43,61 +43,60 @@ const registerFace = async (req, res, next) => {
 
     const imageBuffer = Buffer.from(faceImage.replace(/^data:image\/\w+;base64,/, ''), 'base64');
 
-    // Send to Python face service
+    // Send to Python face service — it handles embedding extraction + DB write + Cloudinary upload
     const formData = new FormData();
     formData.append('user_id', teacherId.toString());
     formData.append('file', imageBuffer, { filename: 'face.jpg', contentType: 'image/jpeg' });
 
     let faceImageUrl = null;
-    let registered = false;
 
     try {
+      console.log(`📡 Calling face service at: ${FACE_SERVICE_URL}/register-face`);
       const pyRes = await axios.post(`${FACE_SERVICE_URL}/register-face`, formData, {
         headers: formData.getHeaders(),
         timeout: 30000,
       });
+
+      if (!pyRes.data.success) {
+        return res.status(400).json({ success: false, message: pyRes.data.detail || 'Face registration failed in Python service' });
+      }
+
       faceImageUrl = pyRes.data.imageUrl;
-      registered = pyRes.data.success;
+      console.log(`✅ Face service registered face, imageUrl=${faceImageUrl}`);
+
     } catch (serviceErr) {
-      console.warn('⚠️  Python face service unavailable — saving image as fallback');
-      // Fallback: upload to Cloudinary directly
-      try {
-        const uploadRes = await new Promise((resolve, reject) => {
-          const uploadStream = cloudinary.uploader.upload_stream(
-            { folder: 'teacher_attendance/faces', public_id: `teacher_${teacherId}` },
-            (err, res) => (err ? reject(err) : resolve(res))
-          );
-          require('stream').Readable.from(imageBuffer).pipe(uploadStream);
-        });
-        faceImageUrl = uploadRes.secure_url;
-      } catch (_) {}
-      registered = true; // fallback mode
+      // Log the real error so we can debug on Render
+      console.error('❌ Python face service error:', serviceErr.message);
+      console.error('   FACE_SERVICE_URL =', FACE_SERVICE_URL);
+      if (serviceErr.response) {
+        console.error('   HTTP status:', serviceErr.response.status, serviceErr.response.data);
+      }
+      return res.status(503).json({
+        success: false,
+        message: `Face service unavailable. Please check that FACE_SERVICE_URL is set correctly on your server. URL tried: ${FACE_SERVICE_URL}`,
+      });
     }
 
-    // Only mark face as registered if the Python service confirmed success
-    const updateFields = { faceImageUrl };
-    if (registered) updateFields.faceRegisteredAt = new Date();
-
+    // Node backend only needs to update faceImageUrl + faceRegisteredAt
+    // The Python service already wrote the faceEncoding binary directly to MongoDB
     const oldTeacher = await Teacher.findById(teacherId);
     const isUpdate = oldTeacher && !!oldTeacher.faceRegisteredAt;
 
     const updatedTeacher = await Teacher.findByIdAndUpdate(
       teacherId,
-      updateFields,
+      { faceImageUrl, faceRegisteredAt: new Date() },
       { new: true }
     );
 
-    if (registered) {
-      try {
-        await BiometricLog.create({
-          teacherId,
-          biometricType: 'FACE',
-          action: isUpdate ? 'UPDATE' : 'REGISTER',
-          details: isUpdate ? 'Face registration updated' : 'Face registered successfully',
-        });
-      } catch (logErr) {
-        console.warn('⚠️ Failed to save face registration log:', logErr);
-      }
+    try {
+      await BiometricLog.create({
+        teacherId,
+        biometricType: 'FACE',
+        action: isUpdate ? 'UPDATE' : 'REGISTER',
+        details: isUpdate ? 'Face registration updated' : 'Face registered successfully',
+      });
+    } catch (logErr) {
+      console.warn('⚠️ Failed to save face registration log:', logErr);
     }
 
     res.json({
@@ -105,7 +104,7 @@ const registerFace = async (req, res, next) => {
       message: '✅ Face registered successfully',
       data: {
         faceImageUrl,
-        registered,
+        registered: true,
         faceRegistered: true,
         teacher: {
           id: updatedTeacher._id,
