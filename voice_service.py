@@ -57,10 +57,19 @@ app.add_middleware(
 # ── MongoDB client setup ──
 mongo_uri = os.getenv('MONGODB_URI', '')
 try:
-    mongo_client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=10000)
+    mongo_client = AsyncIOMotorClient(
+        mongo_uri,
+        serverSelectionTimeoutMS=10000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=10000
+    )
 except Exception as e:
     print(f'⚠️ Motor connect warning: {e}')
-    mongo_client = AsyncIOMotorClient(mongo_uri)
+    mongo_client = AsyncIOMotorClient(
+        mongo_uri,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=10000
+    )
 db = mongo_client.teacher_attendance
 
 # ── Storage dir for embeddings ─────────────────────────────────────────────────
@@ -337,6 +346,14 @@ try:
     log.info("Loading Resemblyzer VoiceEncoder on CPU at startup...")
     _encoder = VoiceEncoder(device="cpu")
     log.info("✅ Resemblyzer VoiceEncoder loaded successfully")
+    # Warm up the encoder with a dummy input (3 seconds of silence) to prevent first-request PyTorch compilation latency
+    try:
+        log.info("Warming up VoiceEncoder...")
+        dummy_wav = np.zeros(16000 * 3, dtype=np.float32)
+        _encoder.embed_utterance(preprocess_wav(dummy_wav, source_sr=16000))
+        log.info("✅ VoiceEncoder warmup complete")
+    except Exception as warmup_err:
+        log.warning(f"⚠️ VoiceEncoder warmup failed: {warmup_err}")
 except Exception as e:
     log.error(f"❌ Failed to load Resemblyzer VoiceEncoder: {e}")
     _encoder = None
@@ -638,9 +655,9 @@ async def verify_voice(
             raise HTTPException(500, f"Feature extraction failed: {e}")
 
         similarity = cosine_similarity(embed_live, embed_stored)
-        # Use 0.70 (70%) as standard Resemblyzer similarity threshold
-        verified = bool(similarity >= 0.70)
-        verify_threshold = 0.70
+        # Use 0.65 (65%) as standard Resemblyzer similarity threshold for user-friendly verification
+        verified = bool(similarity >= 0.65)
+        verify_threshold = 0.65
         log.info(f"Secure Resemblyzer verify  user={user_id}  sim={similarity:.4f}  "
                  f"threshold={verify_threshold}  verified={verified}")
     else:

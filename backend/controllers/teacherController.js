@@ -367,9 +367,11 @@ const deleteVoice = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
 
-    const latestVoiceLog = await BiometricLog.findOne({ teacherId, biometricType: 'VOICE' }).sort({ timestamp: -1 });
-    const voiceRegistered = latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false;
-    if (!voiceRegistered) {
+    const teacher = await Teacher.findById(teacherId).select('+voiceEncoding');
+    if (!teacher) {
+      return res.status(404).json({ success: false, message: 'Teacher not found' });
+    }
+    if (!teacher.voiceEncoding) {
       return res.status(400).json({ success: false, message: 'Voice registration not found' });
     }
 
