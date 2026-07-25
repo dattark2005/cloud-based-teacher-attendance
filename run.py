@@ -121,54 +121,87 @@ signal.signal(signal.SIGTERM, shutdown)
 
 # Maps import-name → pip package name
 IMPORT_TO_PKG = {
-    "fastapi":       "fastapi>=0.110.0",
-    "uvicorn":       "uvicorn[standard]>=0.29.0",
-    "motor":         "motor>=3.4.0",
-    "PIL":           "pillow>=10.3.0",
-    "numpy":         "numpy>=1.26.4",
-    "cv2":           "opencv-contrib-python>=4.9.0.80",
-    "cloudinary":    "cloudinary>=1.39.0",
-    "dotenv":        "python-dotenv>=1.0.1",
-    "multipart":     "python-multipart>=0.0.9",
-    "httpx":         "httpx>=0.27.0",
-    "bson":          "pymongo>=4.6.0",
-    "pytest":        "pytest>=8.0.0",
-    "starlette":     "starlette>=0.36.0",
-    "websockets":    "websockets>=12.0",
-    "resemblyzer":   "resemblyzer>=0.1.1.dev0",
-    "librosa":       "librosa>=0.10.0",
-    "soundfile":     "soundfile>=0.12.1",
+    "fastapi":            "fastapi>=0.110.0",
+    "uvicorn":            "uvicorn[standard]>=0.29.0",
+    "motor":              "motor>=3.4.0",
+    "PIL":                "pillow>=10.3.0",
+    "numpy":              "numpy>=1.26.4",
+    "cv2":                "opencv-contrib-python>=4.9.0.80",
+    "cloudinary":         "cloudinary>=1.39.0",
+    "dotenv":             "python-dotenv>=1.0.1",
+    "multipart":          "python-multipart>=0.0.9",
+    "httpx":              "httpx>=0.27.0",
+    "bson":               "pymongo>=4.6.0",
+    "pytest":             "pytest>=8.0.0",
+    "starlette":          "starlette>=0.36.0",
+    "websockets":         "websockets>=12.0",
+    "torch":              "torch>=2.0.0",
+    "scipy":              "scipy>=1.11.0",
+    "resemblyzer":        "resemblyzer>=0.1.1.dev0",
+    "soundfile":          "soundfile>=0.12.1",
     "speech_recognition": "SpeechRecognition>=3.10.0",
-    "av":            "av>=12.0.0",
+    "av":                 "av>=12.0.0",
 }
 
 PKG_INSTALL_NAME = {
-    "fastapi":       "fastapi",
-    "uvicorn":       "uvicorn[standard]",
-    "motor":         "motor",
-    "PIL":           "pillow",
-    "numpy":         "numpy",
-    "cv2":           "opencv-contrib-python",
-    "cloudinary":    "cloudinary",
-    "dotenv":        "python-dotenv",
-    "multipart":     "python-multipart",
-    "httpx":         "httpx",
-    "bson":          "pymongo",
-    "pytest":        "pytest",
-    "starlette":     "starlette",
-    "websockets":    "websockets",
-    "resemblyzer":   "resemblyzer",
-    "librosa":       "librosa",
-    "soundfile":     "soundfile",
+    "fastapi":            "fastapi",
+    "uvicorn":            "uvicorn[standard]",
+    "motor":              "motor",
+    "PIL":                "pillow",
+    "numpy":              "numpy",
+    "cv2":                "opencv-contrib-python",
+    "cloudinary":         "cloudinary",
+    "dotenv":             "python-dotenv",
+    "multipart":          "python-multipart",
+    "httpx":              "httpx",
+    "bson":               "pymongo",
+    "pytest":             "pytest",
+    "starlette":          "starlette",
+    "websockets":         "websockets",
+    "torch":              "torch",
+    "scipy":              "scipy",
+    "resemblyzer":        "resemblyzer",
+    "soundfile":          "soundfile",
     "speech_recognition": "SpeechRecognition",
-    "av":            "av",
+    "av":                 "av",
 }
 
 
+def ensure_env_files():
+    """Auto-create default .env files if missing."""
+    backend_env = BACKEND_DIR / ".env"
+    if not backend_env.exists():
+        content = """PORT=5000
+MONGODB_URI=mongodb://localhost:27017/teacher_attendance
+JWT_SECRET=super_secret_jwt_key_12345
+FACE_SERVICE_URL=http://localhost:8000
+VOICE_SERVICE_URL=http://localhost:8001
+"""
+        backend_env.write_text(content, encoding="utf-8")
+        print(c(GREEN, "  [+] Auto-created default backend/.env"))
+
+    frontend_env = FRONTEND_DIR / ".env"
+    if not frontend_env.exists():
+        content = """VITE_API_URL=http://localhost:5000/api
+VITE_FACE_SERVICE_URL=http://localhost:8000
+VITE_VOICE_SERVICE_URL=http://localhost:8001
+"""
+        frontend_env.write_text(content, encoding="utf-8")
+        print(c(GREEN, "  [+] Auto-created default frontend/.env"))
+
+
 def check_and_install_imports():
-    """Check every package face_service.py needs. Auto-install if missing."""
+    """Check every package needed by services. Auto-install if missing or requirement updated."""
     import importlib
-    print(c(BOLD+WHITE, "  [*] Checking Python imports...\n"))
+    print(c(BOLD+WHITE, "  [*] Checking Python imports & dependencies...\n"))
+    
+    # Run pip install -r requirements.txt to ensure all exact versions are satisfied
+    if REQ_FILE.exists():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-r", str(REQ_FILE), "--quiet"],
+            shell=False
+        )
+
     missing = []
     for mod, req in IMPORT_TO_PKG.items():
         try:
@@ -179,7 +212,7 @@ def check_and_install_imports():
             missing.append((mod, req))
 
     if not missing:
-        print(c(GREEN, "\n  [OK] All packages present"))
+        print(c(GREEN, "\n  [OK] All Python packages present"))
         return
 
     print(c(YELLOW, f"\n  [*]  Auto-installing {len(missing)} missing package(s)..."))
@@ -268,6 +301,9 @@ def run_tests():
 
 def main():
     print_banner()
+
+    # Step 0 — Environment files setup
+    ensure_env_files()
 
     # Step 1 — Python dependencies check & auto-install
     check_and_install_imports()
