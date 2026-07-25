@@ -1,40 +1,38 @@
 const mongoose = require('mongoose');
 
 const connectDB = async (retries = 3) => {
-  const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/teacher_attendance';
+  const uri = process.env.MONGODB_URI;
+
+  if (!uri) {
+    console.error('❌ MONGODB_URI is not set in .env file!');
+    return;
+  }
 
   for (let i = 0; i < retries; i++) {
     try {
       const conn = await mongoose.connect(uri, {
-        serverSelectionTimeoutMS: 5000,
+        serverSelectionTimeoutMS: 8000,
         socketTimeoutMS: 45000,
       });
-      console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+      console.log(`✅ MongoDB Atlas Connected: ${conn.connection.host}`);
       return;
     } catch (error) {
       console.error(`❌ MongoDB attempt ${i+1}/${retries}: ${error.message}`);
+
+      if (error.message.includes('whitelist') || error.message.includes('IP')) {
+        console.error('🔒 FIX: Go to MongoDB Atlas → Security → Network Access → Add your current IP address');
+        break; // No point retrying for IP whitelist issues
+      }
+
       if (i < retries - 1) {
-        console.log(`⏳ Retrying in 2s...`);
-        await new Promise(r => setTimeout(r, 2000));
+        console.log(`⏳ Retrying in 3s...`);
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        console.error('❌ MongoDB Atlas failed after all retries. Server will run without DB.');
+        console.error('🔒 If IP whitelist error: MongoDB Atlas → Security → Network Access → Add IP');
       }
     }
   }
-
-  // Fallback to local MongoDB if remote MongoDB Atlas cluster timed out or failed IP whitelisting
-  if (uri.includes('mongodb.net') || uri.includes('shard')) {
-    console.log('⚠️ Remote MongoDB Atlas failed (IP whitelist or network issue). Trying local MongoDB fallback (mongodb://localhost:27017)...');
-    try {
-      const localConn = await mongoose.connect('mongodb://localhost:27017/teacher_attendance', {
-        serverSelectionTimeoutMS: 3000,
-      });
-      console.log(`✅ MongoDB Connected (Local Fallback): ${localConn.connection.host}`);
-      return;
-    } catch (localErr) {
-      console.error(`❌ Local MongoDB fallback also failed: ${localErr.message}`);
-    }
-  }
-
-  console.error('❌ MongoDB failed after all retries.');
 };
 
 module.exports = connectDB;
