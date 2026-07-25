@@ -524,7 +524,7 @@ async def register_voice(
     path = embedding_path(user_id)
     np.save(str(path), embed)
 
-    # Save to MongoDB teachers collection
+    # Save to MongoDB teachers collection & biometriclogs
     try:
         encoding_bytes = embed.tobytes()
         await db.teachers.update_one(
@@ -533,6 +533,25 @@ async def register_voice(
                 "voiceEncoding": encoding_bytes
             }}
         )
+        try:
+            import datetime
+            prev_log = await db.biometriclogs.find_one(
+                {"teacherId": ObjectId(user_id), "biometricType": "VOICE"},
+                sort=[("timestamp", -1)]
+            )
+            action = "UPDATE" if (prev_log and prev_log.get("action") != "DELETE") else "REGISTER"
+            now = datetime.datetime.utcnow()
+            await db.biometriclogs.insert_one({
+                "teacherId": ObjectId(user_id),
+                "biometricType": "VOICE",
+                "action": action,
+                "details": f"Voice profile registered ({len(wav)/16000:.1f}s sample, {embed.shape[0]}-dim)",
+                "timestamp": now,
+                "createdAt": now,
+                "updatedAt": now
+            })
+        except Exception as log_err:
+            log.warning(f"⚠️ Failed to insert biometric log in MongoDB: {log_err}")
     except Exception as mongo_err:
         log.error(f"⚠️ Failed to persist voice embedding in MongoDB: {mongo_err}")
 
@@ -606,17 +625,15 @@ async def verify_voice(
         import speech_recognition as sr
         r = sr.Recognizer()
         try:
-            with io.BytesIO(audio_bytes) as buf:
-                import soundfile as sf
-                wav_data, sr_val = sf.read(buf)
+            import soundfile as sf
+            wav_data = load_audio(audio_bytes)
+            temp_buf = io.BytesIO()
+            sf.write(temp_buf, wav_data, 16000, format='WAV', subtype='PCM_16')
+            temp_buf.seek(0)
+            
+            with sr.AudioFile(temp_buf) as source:
+                audio_data = r.record(source)
                 
-                temp_buf = io.BytesIO()
-                sf.write(temp_buf, wav_data, sr_val, format='WAV', subtype='PCM_16')
-                temp_buf.seek(0)
-                
-                with sr.AudioFile(temp_buf) as source:
-                    audio_data = r.record(source)
-                    
             text_spoken = r.recognize_google(audio_data).lower()
             log.info(f"Challenge matching: expected='{expected_phrase}' | spoken='{text_spoken}'")
             
@@ -719,6 +736,20 @@ async def delete_voice(user_id: str):
         )
         if res.modified_count > 0:
             deleted = True
+        try:
+            import datetime
+            now = datetime.datetime.utcnow()
+            await db.biometriclogs.insert_one({
+                "teacherId": ObjectId(user_id),
+                "biometricType": "VOICE",
+                "action": "DELETE",
+                "details": "Voice profile deleted",
+                "timestamp": now,
+                "createdAt": now,
+                "updatedAt": now
+            })
+        except Exception:
+            pass
     except Exception as mongo_err:
         log.error(f"Failed to delete voice from MongoDB: {mongo_err}")
     

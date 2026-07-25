@@ -85,6 +85,47 @@ describe('BiometricLog & Deletion Endpoints', () => {
     });
   });
 
+  describe('GET /api/teachers/profile voiceRegistered check', () => {
+    test('should return voiceRegistered: true if teacher has voiceEncoding set in DB', async () => {
+      Teacher.findById.mockResolvedValueOnce({
+        _id: 'teacher123',
+        fullName: 'Test Teacher',
+        email: 'test@example.com',
+        voiceEncoding: Buffer.from('mock_voice_bytes'),
+      });
+      BiometricLog.findOne.mockReturnValueOnce({
+        sort: jest.fn().mockResolvedValueOnce(null),
+      });
+
+      const res = await request(app)
+        .get('/api/teachers/profile')
+        .set('Authorization', AUTH);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.teacher.voiceRegistered).toBe(true);
+    });
+
+    test('should return voiceRegistered: true if latest BiometricLog is REGISTER even without loaded voiceEncoding', async () => {
+      Teacher.findById.mockResolvedValueOnce({
+        _id: 'teacher123',
+        fullName: 'Test Teacher',
+        email: 'test@example.com',
+      });
+      BiometricLog.findOne.mockReturnValueOnce({
+        sort: jest.fn().mockResolvedValueOnce({ action: 'REGISTER' }),
+      });
+
+      const res = await request(app)
+        .get('/api/teachers/profile')
+        .set('Authorization', AUTH);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.teacher.voiceRegistered).toBe(true);
+    });
+  });
+
   describe('DELETE /api/teachers/face', () => {
     test('should delete face registration successfully', async () => {
       Teacher.findById.mockResolvedValueOnce({
@@ -126,6 +167,10 @@ describe('BiometricLog & Deletion Endpoints', () => {
 
   describe('DELETE /api/teachers/voice', () => {
     test('should delete voice registration successfully', async () => {
+      Teacher.findById.mockResolvedValue({
+        _id: 'teacher123',
+        voiceEncoding: Buffer.from('test_voice'),
+      });
       const mockLatestLog = {
         action: 'REGISTER',
       };
@@ -152,6 +197,10 @@ describe('BiometricLog & Deletion Endpoints', () => {
     });
 
     test('should return 400 if voice not registered', async () => {
+      Teacher.findById.mockResolvedValue({
+        _id: 'teacher123',
+        voiceEncoding: null,
+      });
       BiometricLog.findOne.mockReturnValueOnce({
         sort: jest.fn().mockResolvedValueOnce(null),
       });

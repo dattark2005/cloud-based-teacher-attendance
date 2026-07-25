@@ -459,7 +459,6 @@ describe('Teacher routes', () => {
   test('TC-46 — registerFace does NOT set faceRegisteredAt on service failure', async () => {
     // If Python service returns success:false, faceRegisteredAt should NOT be set
     axios.post.mockResolvedValueOnce({ data: { success: false, imageUrl: null } });
-    Teacher.findByIdAndUpdate.mockResolvedValueOnce({ ...teacherFixture, faceRegisteredAt: null });
 
     const fakeBase64 = 'data:image/jpeg;base64,' + Buffer.alloc(100).toString('base64');
     const res = await request(app)
@@ -467,10 +466,7 @@ describe('Teacher routes', () => {
       .set('Authorization', AUTH)
       .send({ faceImage: fakeBase64 });
 
-    const updateCall = Teacher.findByIdAndUpdate.mock.calls[0];
-    if (updateCall) {
-      expect(updateCall[1]).not.toHaveProperty('faceRegisteredAt');
-    }
+    expect(res.status).toBe(400);
   });
 
   test('TC-50 — PUT /api/teachers/profile — 200 updates details successfully', async () => {

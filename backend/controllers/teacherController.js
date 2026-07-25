@@ -29,6 +29,26 @@ function getTodayDateString() {
   return `${partMap.year}-${partMap.month}-${partMap.day}`;
 }
 
+const findTeacherWithVoice = async (id) => {
+  const res = Teacher.findById(id);
+  if (res && typeof res.select === 'function') {
+    return await res.select('+voiceEncoding');
+  }
+  return await res;
+};
+
+const updateTeacherWithVoice = async (id, updateFields) => {
+  const res = Teacher.findByIdAndUpdate(
+    id,
+    { $set: updateFields },
+    { new: true, runValidators: true }
+  );
+  if (res && typeof res.select === 'function') {
+    return await res.select('+voiceEncoding');
+  }
+  return await res;
+};
+
 // ─── REGISTER FACE ─────────────────────────────────────────────────────────
 
 // POST /api/teachers/register-face
@@ -124,13 +144,14 @@ const registerFace = async (req, res, next) => {
 // GET /api/teachers/profile
 const getProfile = async (req, res, next) => {
   try {
-    const teacher = await Teacher.findById(req.teacher._id);
+    const teacher = await findTeacherWithVoice(req.teacher._id);
     if (!teacher) return res.status(404).json({ success: false, message: 'Teacher not found' });
     const today = getTodayDateString();
     const todayLog = await AttendanceLog.findOne({ teacherId: teacher._id, date: today });
 
-    const latestVoiceLog = await BiometricLog.findOne({ teacherId: teacher._id, biometricType: 'VOICE' }).sort({ timestamp: -1 });
-    const voiceRegistered = latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false;
+    const logQuery = BiometricLog.findOne({ teacherId: teacher._id, biometricType: 'VOICE' });
+    const latestVoiceLog = (logQuery && typeof logQuery.sort === 'function') ? await logQuery.sort({ timestamp: -1 }) : await logQuery;
+    const voiceRegistered = !!(teacher && teacher.voiceEncoding) || (latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false);
 
     res.json({
       success: true,
@@ -208,16 +229,13 @@ const updateProfile = async (req, res, next) => {
     if (department) updateFields.department = department.toLowerCase().trim();
     if (phone !== undefined) updateFields.phone = phone ? phone.trim() : null;
 
-    const teacher = await Teacher.findByIdAndUpdate(
-      teacherId,
-      { $set: updateFields },
-      { new: true, runValidators: true }
-    );
+    const teacher = await updateTeacherWithVoice(teacherId, updateFields);
 
     if (!teacher) return res.status(404).json({ success: false, message: 'Teacher not found' });
 
-    const latestVoiceLog = await BiometricLog.findOne({ teacherId, biometricType: 'VOICE' }).sort({ timestamp: -1 });
-    const voiceRegistered = latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false;
+    const logQuery = BiometricLog.findOne({ teacherId, biometricType: 'VOICE' });
+    const latestVoiceLog = (logQuery && typeof logQuery.sort === 'function') ? await logQuery.sort({ timestamp: -1 }) : await logQuery;
+    const voiceRegistered = !!(teacher && teacher.voiceEncoding) || (latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false);
 
     res.json({
       success: true,
@@ -367,11 +385,15 @@ const deleteVoice = async (req, res, next) => {
   try {
     const teacherId = req.teacher._id;
 
-    const teacher = await Teacher.findById(teacherId).select('+voiceEncoding');
+    const teacher = await findTeacherWithVoice(teacherId);
     if (!teacher) {
       return res.status(404).json({ success: false, message: 'Teacher not found' });
     }
-    if (!teacher.voiceEncoding) {
+
+    const logQuery = BiometricLog.findOne({ teacherId, biometricType: 'VOICE' });
+    const latestVoiceLog = (logQuery && typeof logQuery.sort === 'function') ? await logQuery.sort({ timestamp: -1 }) : await logQuery;
+    const isRegistered = !!(teacher && teacher.voiceEncoding) || (latestVoiceLog ? (latestVoiceLog.action !== 'DELETE') : false);
+    if (!isRegistered) {
       return res.status(400).json({ success: false, message: 'Voice registration not found' });
     }
 
